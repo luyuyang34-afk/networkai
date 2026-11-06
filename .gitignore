@@ -1,0 +1,14 @@
+# Compiled binaries
+/networkai
+*.exe
+*.test
+*.out
+
+# Secrets and local env files
+.env
+*.env
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
