@@ -12,3 +12,6 @@
 .vscode/
 .idea/
 .DS_Store
+
+# GAE config (holds env secrets in Cloud Shell)
+app.yaml

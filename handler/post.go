@@ -4,22 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 
 	"networkai/model"
 	"networkai/service"
+
+	"github.com/gorilla/mux"
+	"github.com/pborman/uuid"
+    jwt "github.com/form3tech-oss/jwt-go"
+)
+var (
+    mediaTypes = map[string]string{
+        ".jpeg": "image",
+        ".jpg":  "image",
+        ".gif":  "image",
+        ".png":  "image",
+        ".mov":  "video",
+        ".mp4":  "video",
+        ".avi":  "video",
+        ".flv":  "video",
+        ".wmv":  "video",
+    }
 )
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-    // Parse from body of request to get a json object.
-    fmt.Println("Received one upload request")
-    decoder := json.NewDecoder(r.Body)
-    var p model.Post
-    if err := decoder.Decode(&p); err != nil {
-        panic(err)
-    }
 
-    fmt.Fprintf(w, "Post received: %s\n", p.Message)
-}
+
 func searchHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Println("Received one request for search")
     w.Header().Set("Content-Type", "application/json")
@@ -50,5 +59,60 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
     w.Write(js)
 }
 
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Println("Received one upload request")
 
+    token := r.Context().Value("user")
+    claims := token.(*jwt.Token).Claims
+    username := claims.(jwt.MapClaims)["username"]
 
+    p := model.Post{
+        Id:      uuid.New(),
+        User:    username.(string),
+        Message: r.FormValue("message"),
+    }
+
+    file, header, err := r.FormFile("media_file")
+    if err != nil {
+        http.Error(w, "Media file is not available", http.StatusBadRequest)
+        fmt.Printf("Media file is not available %v\n", err)
+        return
+    }
+
+    suffix := filepath.Ext(header.Filename)
+    if t, ok := mediaTypes[suffix]; ok {
+        p.Type = t
+    } else {
+        p.Type = "unknown"
+    }
+
+    err = service.SavePost(&p, file)
+    if err != nil {
+        http.Error(w, "Failed to save post to backend", http.StatusInternalServerError)
+        fmt.Printf("Failed to save post to backend %v\n", err)
+        return
+    }
+
+    fmt.Println("Post is saved successfully.")
+}
+
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Println("Received one request for delete")
+
+    token := r.Context().Value("user")
+    claims := token.(*jwt.Token).Claims
+    username := claims.(jwt.MapClaims)["username"].(string)
+    id := mux.Vars(r)["id"]
+
+    deleted, err := service.DeletePost(id, username)
+    if err != nil {
+        http.Error(w, "Failed to delete post from backend", http.StatusInternalServerError)
+        fmt.Printf("Failed to delete post from backend %v\n", err)
+        return
+    }
+    if deleted == 0 {
+        http.Error(w, "Post not found or not owned by user", http.StatusNotFound)
+        return
+    }
+    fmt.Println("Post is deleted successfully")
+}

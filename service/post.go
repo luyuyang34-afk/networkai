@@ -1,6 +1,7 @@
 package service
 
 import (
+	"mime/multipart"
 	"reflect"
 
 	"networkai/backend"
@@ -42,4 +43,19 @@ func getPostFromSearchResult(searchResult *elastic.SearchResult) []model.Post {
     }
     return posts
 }
+func SavePost(post *model.Post, file multipart.File) error {
+    medialink, err := backend.GCSBackend.SaveToGCS(file, post.Id)
+    if err != nil {
+        return err
+    }
+    post.Url = medialink
 
+    return backend.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id)
+}
+
+func DeletePost(id string, user string) (int64, error) {
+    query := elastic.NewBoolQuery()
+    query.Must(elastic.NewTermQuery("id", id))
+    query.Must(elastic.NewTermQuery("user", user))
+    return backend.ESBackend.DeleteFromES(query, constants.POST_INDEX)
+}
