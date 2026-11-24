@@ -241,29 +241,25 @@ func (s *Store) ListPosts(ctx context.Context, lp ListParams) ([]Post, *PageCurs
 	return posts, next, nil
 }
 
-// ForEachPostID streams every post id (including deleted) in batches. Used by
-// the full reindex.
-func (s *Store) ForEachPostID(ctx context.Context, batch int, fn func(uuid.UUID) error) error {
-	var after uuid.UUID // zero UUID sorts first
-	for {
-		rows, err := s.pool.Query(ctx, `SELECT id FROM posts WHERE id > $1 ORDER BY id LIMIT $2`, after, batch)
-		if err != nil {
-			return err
-		}
-		ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			if err := fn(id); err != nil {
-				return err
-			}
-		}
-		if len(ids) < batch {
-			return nil
-		}
-		after = ids[len(ids)-1]
+// PostsForIndexAfter returns up to limit posts (including soft-deleted ones)
+// with id > after, ordered by id. Used by the bulk reindex.
+func (s *Store) PostsForIndexAfter(ctx context.Context, after uuid.UUID, limit int) ([]Post, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+postColumns+` FROM posts p JOIN users u ON u.id = p.author_id
+		 WHERE p.id > $1 ORDER BY p.id LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, err
 	}
+	defer rows.Close()
+	var out []Post
+	for rows.Next() {
+		p, err := scanPost(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // MediaKeysInUse returns which of keys are referenced by a live post.

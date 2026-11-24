@@ -179,6 +179,85 @@ func (c *Client) Upsert(ctx context.Context, doc Doc, version int64) (applied bo
 	}
 }
 
+// VersionedDoc pairs a document with its external version for BulkUpsert.
+type VersionedDoc struct {
+	Doc     Doc
+	Version int64
+}
+
+// BulkResult counts per-document outcomes of a bulk request.
+type BulkResult struct {
+	Applied int
+	Stale   int // rejected because a newer version is already indexed (409)
+}
+
+// BulkUpsert writes many documents in one request using the _bulk API, with
+// the same external-version semantics as Upsert. One round trip per batch
+// instead of per document is what makes a full reindex fast.
+func (c *Client) BulkUpsert(ctx context.Context, docs []VersionedDoc) (BulkResult, error) {
+	if len(docs) == 0 {
+		return BulkResult{}, nil
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf) // Encode appends the newline NDJSON needs
+	for _, d := range docs {
+		meta := map[string]any{"index": map[string]any{
+			"_index": c.alias, "_id": d.Doc.ID, "version": d.Version, "version_type": "external",
+		}}
+		if err := enc.Encode(meta); err != nil {
+			return BulkResult{}, err
+		}
+		if err := enc.Encode(d.Doc); err != nil {
+			return BulkResult{}, err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/_bulk", &buf)
+	if err != nil {
+		return BulkResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	resp, err := c.send(req)
+	if err != nil {
+		return BulkResult{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return BulkResult{}, fmt.Errorf("bulk: status %d: %s", resp.StatusCode, readBody(resp))
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Errors bool `json:"errors"`
+		Items  []map[string]struct {
+			ID     string          `json:"_id"`
+			Status int             `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return BulkResult{}, fmt.Errorf("decode bulk response: %w", err)
+	}
+	var res BulkResult
+	var firstErr error
+	for _, item := range out.Items {
+		for _, r := range item {
+			switch {
+			case r.Status >= 200 && r.Status < 300:
+				res.Applied++
+			case r.Status == http.StatusConflict:
+				res.Stale++
+			case r.Status == http.StatusTooManyRequests || r.Status >= 500:
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%w: bulk item %s: status %d", ErrUnavailable, r.ID, r.Status)
+				}
+			default:
+				if firstErr == nil {
+					firstErr = fmt.Errorf("bulk item %s: status %d: %s", r.ID, r.Status, r.Error)
+				}
+			}
+		}
+	}
+	return res, firstErr
+}
+
 // Refresh makes recent writes visible to search immediately. Tests and the
 // demo use it; production relies on the default 1s refresh interval.
 func (c *Client) Refresh(ctx context.Context) error {
@@ -337,6 +416,12 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return c.send(req)
+}
+
+// send executes req with auth and maps transport errors, 5xx and 429 to
+// ErrUnavailable.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
 	if c.username != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}

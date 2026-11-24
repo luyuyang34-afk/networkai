@@ -25,11 +25,12 @@ import (
 
 type postSource interface {
 	GetPostForIndex(ctx context.Context, id uuid.UUID) (store.Post, error)
-	ForEachPostID(ctx context.Context, batch int, fn func(uuid.UUID) error) error
+	PostsForIndexAfter(ctx context.Context, after uuid.UUID, limit int) ([]store.Post, error)
 }
 
 type docSink interface {
 	Upsert(ctx context.Context, doc search.Doc, version int64) (bool, error)
+	BulkUpsert(ctx context.Context, docs []search.VersionedDoc) (search.BulkResult, error)
 }
 
 type Indexer struct {
@@ -70,15 +71,36 @@ func (ix *Indexer) IndexPost(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// ReindexBatchSize is the number of posts per PostgreSQL page and per
+// Elasticsearch _bulk request.
+const ReindexBatchSize = 500
+
 // Reindex rebuilds the search index from PostgreSQL. It is safe to run while
 // the worker is running: external versions make concurrent writes converge.
+//
+// It reads posts in id-ordered pages and writes each page with one _bulk
+// request: two round trips per 500 posts instead of two per post.
 func (ix *Indexer) Reindex(ctx context.Context) (int, error) {
 	n := 0
-	err := ix.Posts.ForEachPostID(ctx, 500, func(id uuid.UUID) error {
-		n++
-		return ix.IndexPost(ctx, id)
-	})
-	return n, err
+	var after uuid.UUID
+	for {
+		posts, err := ix.Posts.PostsForIndexAfter(ctx, after, ReindexBatchSize)
+		if err != nil {
+			return n, err
+		}
+		if len(posts) == 0 {
+			return n, nil
+		}
+		batch := make([]search.VersionedDoc, len(posts))
+		for i, p := range posts {
+			batch[i] = search.VersionedDoc{Doc: ToDoc(p), Version: p.Version}
+		}
+		if _, err := ix.Index.BulkUpsert(ctx, batch); err != nil {
+			return n, err
+		}
+		n += len(posts)
+		after = posts[len(posts)-1].ID
+	}
 }
 
 func ToDoc(p store.Post) search.Doc {

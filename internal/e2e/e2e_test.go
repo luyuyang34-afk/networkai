@@ -412,3 +412,60 @@ func TestPurgeTombstonesRemovesOnlyOldDeletedDocs(t *testing.T) {
 		t.Fatalf("after purge, search = %+v", res.Docs)
 	}
 }
+
+// Reindex must rebuild exactly what PostgreSQL says (including deletes and
+// edits) across several bulk batches, and must never overwrite a newer
+// version that the live worker already indexed.
+func TestBulkReindexMatchesPostgres(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	e.login("alice") // creates the author
+	// 1201 posts = 3 bulk batches, the last one partial.
+	if _, err := e.pool.Exec(ctx, `
+		INSERT INTO posts (id, author_id, message, media_type)
+		SELECT gen_random_uuid(), (SELECT id FROM users WHERE username = 'alice'),
+		       'bulk post ' || g || CASE WHEN g % 100 = 0 THEN ' special' ELSE '' END, 'none'
+		FROM generate_series(1, 1201) g`); err != nil {
+		t.Fatal(err)
+	}
+	// Soft-delete 3 of the 12 'special' posts and edit another.
+	if _, err := e.pool.Exec(ctx, `
+		UPDATE posts SET deleted_at = now(), version = version + 1
+		WHERE id IN (SELECT id FROM posts WHERE message LIKE '%special' ORDER BY id LIMIT 3)`); err != nil {
+		t.Fatal(err)
+	}
+	var edited string
+	if err := e.pool.QueryRow(ctx, `
+		UPDATE posts SET message = 'rewritten text', version = version + 1
+		WHERE id = (SELECT id FROM posts WHERE message LIKE '%special' AND deleted_at IS NULL ORDER BY id LIMIT 1)
+		RETURNING id::text`).Scan(&edited); err != nil {
+		t.Fatal(err)
+	}
+	// The live worker already indexed the edited post at a *newer* version
+	// than PostgreSQL will hand the reindex. Reindex must not clobber it.
+	if _, err := e.es.Upsert(ctx, search.Doc{ID: edited, Author: "alice", Message: "newest from live worker",
+		MediaType: "none", CreatedAt: time.Now(), UpdatedAt: time.Now()}, 99); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := e.ix.Reindex(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1201 {
+		t.Fatalf("reindexed %d posts, want 1201", n)
+	}
+	e.es.Refresh(ctx) //nolint:errcheck
+
+	res, err := e.es.Search(ctx, search.Query{Text: "special", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Docs) != 12-3-1 {
+		t.Fatalf("'special' hits = %d, want 8 (12 minus 3 deleted minus 1 edited)", len(res.Docs))
+	}
+	res, _ = e.es.Search(ctx, search.Query{Text: "newest live worker", Limit: 5})
+	if len(res.Docs) != 1 || res.Docs[0].ID != edited {
+		t.Fatalf("reindex overwrote a newer version: %+v", res.Docs)
+	}
+}
