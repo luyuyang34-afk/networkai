@@ -90,7 +90,7 @@ func setup(t *testing.T) *env {
 	}
 	api := httptest.NewServer(httpapi.New(httpapi.Deps{
 		Users: st, Posts: st, Search: es, Media: ms, Likes: st,
-		Feed:   &feed.Service{Signals: st, Index: es, Ranker: ranker},
+		Feed:   &feed.Service{Signals: st, Index: es, Ranker: ranker, Lexical: true},
 		Ready:  readiness{Store: st, pool: pool},
 		Tokens: auth.NewTokens([]byte(strings.Repeat("k", 32)), time.Hour),
 		Log:    quiet,

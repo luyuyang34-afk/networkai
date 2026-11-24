@@ -442,6 +442,12 @@ func (s *Server) forYou(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := auth.FromContext(r.Context())
 	items, err := s.feed.ForYou(r.Context(), p.UserID, p.Username, limit)
+	if errors.Is(err, feed.ErrBusy) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, r, http.StatusServiceUnavailable, "feed_busy",
+			"recommendations are busy; the latest feed still works")
+		return
+	}
 	if errors.Is(err, search.ErrUnavailable) {
 		writeError(w, r, http.StatusServiceUnavailable, "feed_unavailable",
 			"personalised feed is temporarily unavailable; the latest feed still works")

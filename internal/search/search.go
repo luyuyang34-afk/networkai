@@ -83,6 +83,9 @@ type Doc struct {
 	// Embedding is the post's semantic vector (see package embed). Omitted
 	// when no embedding model is configured or the text has no known terms.
 	Embedding []float32 `json:"embedding,omitempty"`
+	// Score is the hit's _score (not stored). For kNN with cosine similarity
+	// Elasticsearch reports (1 + cosine) / 2.
+	Score float64 `json:"-"`
 }
 
 // EmbeddingDims must match the trained model (models/lsa.json).
@@ -229,6 +232,27 @@ func (c *Client) SwapAlias(ctx context.Context, newIndex string) ([]string, erro
 	return old, expect(resp, http.StatusOK)
 }
 
+// ForceMerge merges an index down to one segment. kNN search walks one HNSW
+// graph per segment, so a freshly bulk-loaded index (dozens of segments) is
+// much more expensive to query than a merged one (measured: ~30% less
+// Elasticsearch CPU per feed request). Only worth doing on an index that is
+// not yet taking writes, i.e. before the alias swap of a rebuild.
+func (c *Client) ForceMerge(ctx context.Context, index string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/"+index+"/_forcemerge?max_num_segments=1", nil)
+	if err != nil {
+		return err
+	}
+	// Merging can take minutes on a big index; don't use the 10 s client timeout.
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	return expect(resp, http.StatusOK)
+}
+
 func (c *Client) DeleteIndex(ctx context.Context, name string) error {
 	resp, err := c.do(ctx, http.MethodDelete, "/"+name, nil)
 	if err != nil {
@@ -292,7 +316,15 @@ type CandidateQuery struct {
 	LikeIDs       []string
 	ExcludeIDs    []string
 	ExcludeAuthor string
+	// IncludeEmbedding fetches each candidate's vector. kNN results do not
+	// need it (their score already encodes the cosine), and every vector is
+	// ~1 KB of JSON to serialise, send and parse.
+	IncludeEmbedding bool
 }
+
+// candidateFields is all the ranker needs; text is fetched later, only for
+// the posts that make the final page (see Docs).
+var candidateFields = []string{"id", "author", "created_at"}
 
 // Candidates runs one retrieval source. Results include embeddings, which the
 // ranker needs for its similarity feature.
@@ -309,7 +341,11 @@ func (c *Client) Candidates(ctx context.Context, q CandidateQuery) ([]Doc, error
 		mustNot = append(mustNot, map[string]any{"term": map[string]any{"author": q.ExcludeAuthor}})
 	}
 	boolQ := map[string]any{"filter": filter, "must_not": mustNot}
-	body := map[string]any{"size": q.Size, "track_total_hits": false}
+	fields := candidateFields
+	if q.IncludeEmbedding {
+		fields = append(append([]string{}, candidateFields...), "embedding")
+	}
+	body := map[string]any{"size": q.Size, "track_total_hits": false, "_source": fields}
 
 	switch {
 	case len(q.Vector) > 0:
@@ -317,7 +353,7 @@ func (c *Client) Candidates(ctx context.Context, q CandidateQuery) ([]Doc, error
 		// so all k results satisfy them.
 		body["knn"] = map[string]any{
 			"field": "embedding", "query_vector": q.Vector, "k": q.Size,
-			"num_candidates": max(q.Size*3, 100),
+			"num_candidates": max(q.Size*3, 100), // HNSW search breadth: recall vs CPU
 			"filter":         map[string]any{"bool": boolQ},
 		}
 	case len(q.LikeIDs) > 0:
@@ -350,7 +386,8 @@ func (c *Client) Candidates(ctx context.Context, q CandidateQuery) ([]Doc, error
 	var sr struct {
 		Hits struct {
 			Hits []struct {
-				Source Doc `json:"_source"`
+				Score  float64 `json:"_score"`
+				Source Doc     `json:"_source"`
 			} `json:"hits"`
 		} `json:"hits"`
 	}
@@ -360,8 +397,41 @@ func (c *Client) Candidates(ctx context.Context, q CandidateQuery) ([]Doc, error
 	docs := make([]Doc, len(sr.Hits.Hits))
 	for i, h := range sr.Hits.Hits {
 		docs[i] = h.Source
+		docs[i].Score = h.Score
 	}
 	return docs, nil
+}
+
+// Docs fetches full documents (without embeddings) by id, in one _mget.
+func (c *Client) Docs(ctx context.Context, ids []string) (map[string]Doc, error) {
+	out := make(map[string]Doc, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	body, _ := json.Marshal(map[string]any{"ids": ids})
+	resp, err := c.do(ctx, http.MethodPost, "/"+c.alias+"/_mget?_source_excludes=embedding", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mget: status %d: %s", resp.StatusCode, readBody(resp))
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Docs []struct {
+			Found  bool `json:"found"`
+			Source Doc  `json:"_source"`
+		} `json:"docs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, err
+	}
+	for _, d := range r.Docs {
+		if d.Found && !d.Source.Deleted {
+			out[d.Source.ID] = d.Source
+		}
+	}
+	return out, nil
 }
 
 // Upsert writes doc with an external version. Elasticsearch only accepts the

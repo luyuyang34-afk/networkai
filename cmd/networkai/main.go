@@ -145,6 +145,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 	if err != nil {
 		return err
 	}
+	m := apiMetrics(pool)
 
 	handler := httpapi.New(httpapi.Deps{
 		Users: st, Posts: st, Search: es, Media: ms,
@@ -154,7 +155,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		CORSOrigins:    cfg.CORSOrigins,
 		MaxUploadBytes: cfg.MaxUploadBytes,
 		LocalMediaDir:  localDir,
-		Metrics:        apiMetrics(pool),
+		Metrics:        m,
 		Likes:          st,
 		Feed:           loadFeed(cfg, st, es, log),
 	})
@@ -242,7 +243,8 @@ func loadFeed(cfg config.Config, st *store.Store, es *search.Client, log *slog.L
 		log.Warn("no ranker model; GET /feed disabled", "err", err)
 		return nil
 	}
-	return &feed.Service{Signals: st, Index: es, Ranker: r}
+	return &feed.Service{Signals: st, Index: es, Ranker: r, MaxConcurrent: cfg.FeedMaxConcurrent,
+		Lexical: cfg.FeedLexical}
 }
 
 func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {

@@ -120,6 +120,7 @@ type Rebuilder interface {
 	docSink
 	CreateIndex(ctx context.Context, name string) error
 	SwapAlias(ctx context.Context, newIndex string) ([]string, error)
+	ForceMerge(ctx context.Context, index string) error
 	DeleteIndex(ctx context.Context, name string) error
 	// Into returns a sink that writes to a specific physical index.
 	Into(index string) search.Sink
@@ -129,11 +130,12 @@ type Rebuilder interface {
 //
 //  1. create a new physical index (current mapping)
 //  2. bulk-load every post into it while searches keep using the old one
-//  3. atomically swap the alias to the new index
-//  4. catch up: re-apply posts changed since step 2 began. The live worker
+//  3. force-merge it to one segment (cheaper kNN), still offline
+//  4. atomically swap the alias to the new index
+//  5. catch up: re-apply posts changed since step 2 began. The live worker
 //     kept writing to the old index during the load; external versions
 //     make this replay safe.
-//  5. delete the old index
+//  6. delete the old index
 func (ix *Indexer) RebuildFresh(ctx context.Context, es Rebuilder, newIndex string) (loaded, caughtUp int, err error) {
 	start, err := ix.Posts.Now(ctx)
 	if err != nil {
@@ -145,6 +147,9 @@ func (ix *Indexer) RebuildFresh(ctx context.Context, es Rebuilder, newIndex stri
 	loaded, err = ix.reindexInto(ctx, es.Into(newIndex))
 	if err != nil {
 		return loaded, 0, err
+	}
+	if err := es.ForceMerge(ctx, newIndex); err != nil {
+		return loaded, 0, fmt.Errorf("force merge: %w", err)
 	}
 	old, err := es.SwapAlias(ctx, newIndex)
 	if err != nil {

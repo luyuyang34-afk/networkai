@@ -2,13 +2,18 @@
 //
 //   k6 run -e RATE=200 -e DURATION=60s tools/loadtest/mixed.js
 //
+// Point API at the container's IP, not a published localhost port: Docker's
+// userland port proxy refuses connections under bursty load and would be
+// measured instead of the service (see docs/benchmark.md).
+//
 // Open model: requests arrive at a fixed RATE per second no matter how slow
 // the server gets (constant-arrival-rate). A closed model, where each virtual
 // user waits for its previous response, quietly lowers the load when the
 // server slows down and hides queueing latency ("coordinated omission").
 //
-// Traffic mix (per request):
-//   50% browse   GET /posts?limit=20 (half of those follow one cursor page)
+// Traffic mix (per iteration):
+//   45% browse   GET /posts?limit=20 (half of those follow one cursor page)
+//    5% foryou   GET /feed?limit=20 (personalised, two-stage ranking)
 //   20% read     GET /posts/{id}
 //   20% search   GET /posts/search?q=<1-2 topic words>
 //   10% write    POST /posts (text only, authenticated)
@@ -18,6 +23,8 @@ import { check } from 'k6';
 const API = __ENV.API || 'http://localhost:8080';
 const RATE = Number(__ENV.RATE || 100);
 const DURATION = __ENV.DURATION || '60s';
+// Share of iterations that request the personalised feed (default 5%).
+const FEED_SHARE = Number(__ENV.FEED_SHARE ?? 0.05);
 
 const WORDS = ('run marathon trail coffee espresso roast travel flight beach recipe pasta oven ' +
   'music guitar album photo camera lens book novel author game console quest gym squat ' +
@@ -41,6 +48,7 @@ export const options = {
     'http_req_duration{op:read}': ['p(95)<100'],
     'http_req_duration{op:search}': ['p(95)<150'],
     'http_req_duration{op:write}': ['p(95)<150'],
+    'http_req_duration{op:foryou}': ['p(95)<250'],
   },
   summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
 };
@@ -69,7 +77,12 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 export default function (data) {
   const x = Math.random();
-  if (x < 0.5) {
+  if (x < FEED_SHARE) {
+    const r = http.get(`${API}/feed?limit=20`, {
+      headers: { Authorization: `Bearer ${pick(data.tokens)}` }, tags: { op: 'foryou' },
+    });
+    check(r, { 'foryou 200': (res) => res.status === 200 });
+  } else if (x < 0.5) {
     const r = http.get(`${API}/posts?limit=20`, { tags: { op: 'browse' } });
     check(r, { 'browse 200': (res) => res.status === 200 });
     const next = r.status === 200 ? r.json('next_cursor') : '';
@@ -113,6 +126,6 @@ function textSummary(data) {
   const dropped = m.dropped_iterations ? m.dropped_iterations.values.count : 0;
   return [
     `target rate ${RATE}/s for ${DURATION}: achieved ${reqs.rate.toFixed(1)} req/s, failed ${failed}%, dropped iterations ${dropped}`,
-    line('browse'), line('read'), line('search'), line('write'), '',
+    line('browse'), line('read'), line('search'), line('write'), line('foryou'), '',
   ].join('\n');
 }

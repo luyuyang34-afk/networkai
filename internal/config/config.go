@@ -41,6 +41,9 @@ type Config struct {
 	// ModelDir holds lsa.json and ranker.json. If they are missing, posts are
 	// indexed without embeddings and GET /feed returns 503.
 	ModelDir string
+	// FeedMaxConcurrent caps concurrent personalised-feed requests (bulkhead).
+	FeedMaxConcurrent int
+	FeedLexical       bool
 
 	IndexerBatchSize   int
 	IndexerPoll        time.Duration
@@ -72,6 +75,8 @@ func Load() (Config, error) {
 	c.MaxUploadBytes = int64(intEnv("MAX_UPLOAD_MB", 50, &errs)) << 20
 	c.IndexerBatchSize = intEnv("INDEXER_BATCH_SIZE", c.IndexerBatchSize, &errs)
 	c.IndexerMaxAttempts = intEnv("INDEXER_MAX_ATTEMPTS", c.IndexerMaxAttempts, &errs)
+	c.FeedMaxConcurrent = intEnv("FEED_MAX_CONCURRENT", 2, &errs)
+	c.FeedLexical = os.Getenv("FEED_LEXICAL") == "true"
 
 	if len(c.JWTSecret) < 32 {
 		errs = append(errs, errors.New("JWT_SECRET must be set and at least 32 bytes"))

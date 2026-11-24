@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"networkai/internal/auth"
+	"networkai/internal/feed"
 	"networkai/internal/metrics"
 	"networkai/internal/search"
 	"networkai/internal/store"
@@ -486,4 +487,18 @@ func grepLines(s, sub string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+type fakeFeed struct{ err error }
+
+func (f fakeFeed) ForYou(context.Context, int64, string, int) ([]feed.Item, error) { return nil, f.err }
+
+func TestFeedSheddingMapsToRetryableError(t *testing.T) {
+	h := newHarness(t, nil)
+	h.h = New(Deps{Users: h.st, Posts: h.st, Search: fakeSearch{}, Media: h.media, Tokens: h.tokens,
+		Feed: fakeFeed{err: feed.ErrBusy}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	w := h.req("GET", "/feed", h.tokenFor("alice"), nil, "")
+	if w.Code != 503 || errCode(t, w) != "feed_busy" || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("busy feed: %d %v %s", w.Code, w.Header(), w.Body)
+	}
 }

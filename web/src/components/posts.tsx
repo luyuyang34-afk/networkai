@@ -261,7 +261,7 @@ export function PostList({
       <Alert>
         {code === "search_unavailable"
           ? "Search is temporarily unavailable. The feed and posting still work."
-          : code === "feed_unavailable"
+          : code === "feed_unavailable" || code === "feed_busy"
             ? "Recommendations are temporarily unavailable. The Latest tab still works."
             : errorText(q.error)}
       </Alert>

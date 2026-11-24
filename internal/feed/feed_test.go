@@ -45,18 +45,43 @@ func (f *fakeIndex) Embeddings(_ context.Context, ids []string) (map[string][]fl
 	return out, nil
 }
 
+func (f *fakeIndex) Docs(_ context.Context, ids []string) (map[string]search.Doc, error) {
+	out := map[string]search.Doc{}
+	for _, docs := range f.bySrc {
+		for _, d := range docs {
+			out[d.ID] = d
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeIndex) Candidates(_ context.Context, q search.CandidateQuery) ([]search.Doc, error) {
 	f.mu.Lock()
 	f.queries = append(f.queries, q)
 	f.mu.Unlock()
 	switch {
 	case q.Vector != nil:
-		return f.bySrc["semantic"], nil
+		// Like Elasticsearch: kNN hits carry a (1+cos)/2 score.
+		var out []search.Doc
+		for _, d := range f.bySrc["semantic"] {
+			d.Score = (1 + embedCos(q.Vector, d.Embedding)) / 2
+			d.Embedding = nil
+			out = append(out, d)
+		}
+		return out, nil
 	case q.LikeIDs != nil:
 		return f.bySrc["lexical"], nil
 	default:
 		return f.bySrc["fresh"], nil
 	}
+}
+
+func embedCos(a, b []float32) float64 {
+	var s float64
+	for i := range a {
+		s += float64(a[i]) * float64(b[i])
+	}
+	return s
 }
 
 var now = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
@@ -88,7 +113,8 @@ func TestForYouMergesSourcesAndRanks(t *testing.T) {
 			"fresh":    {doc("h1", hiking, 1), doc("c1", coffee, 10)},
 		},
 	}
-	s := &Service{Signals: fakeSignals{liked: []string{"liked1"}}, Index: ix, Ranker: ranker(), Now: func() time.Time { return now }}
+	s := &Service{Signals: fakeSignals{liked: []string{"liked1"}}, Index: ix, Ranker: ranker(), Lexical: true,
+		Now: func() time.Time { return now }}
 	items, err := s.ForYou(context.Background(), 1, "me", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +157,29 @@ func TestColdStartUsesFreshOnly(t *testing.T) {
 	}
 }
 
+func TestBulkheadShedsExcessRequests(t *testing.T) {
+	s := &Service{MaxConcurrent: 2, QueueWait: 20 * time.Millisecond}
+	r1, err1 := s.acquire(context.Background())
+	r2, err2 := s.acquire(context.Background())
+	if err1 != nil || err2 != nil {
+		t.Fatal("first two requests should get a slot")
+	}
+	start := time.Now()
+	if _, err := s.acquire(context.Background()); err != ErrBusy {
+		t.Fatalf("third concurrent request: %v, want ErrBusy", err)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatal("shedding should be fast")
+	}
+	r1()
+	if r3, err := s.acquire(context.Background()); err != nil {
+		t.Fatal("a released slot should be reusable")
+	} else {
+		r3()
+	}
+	r2()
+}
+
 func TestDiversifyCapsPostsPerAuthor(t *testing.T) {
 	mk := func(id, author string) Item { return Item{Doc: search.Doc{ID: id, Author: author}} }
 	in := []Item{mk("1", "spam"), mk("2", "spam"), mk("3", "spam"), mk("4", "bob"), mk("5", "spam"), mk("6", "cat")}
@@ -144,7 +193,7 @@ func TestDiversifyCapsPostsPerAuthor(t *testing.T) {
 }
 
 func TestFeaturesMatchTrainingDefinitions(t *testing.T) {
-	f := Features([]float32{1, 0}, doc("x", []float32{1, 0}, 24), 3, 1, 1, now)
+	f := Features(1, doc("x", []float32{1, 0}, 24), 3, 1, 1, now)
 	want := map[string]float64{"cosine": 1, "log_likes": 1.3862943611198906, "freshness": 0.36787944117144233,
 		"author_affinity": 0.6931471805599453, "has_history": 1}
 	for k, v := range want {
