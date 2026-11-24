@@ -135,6 +135,48 @@ func TestHandlerPanicIsRetriedNotFatal(t *testing.T) {
 	}
 }
 
+// A dependency outage must not burn retry budgets: otherwise an outage longer
+// than the backoff schedule would dead-letter every pending event.
+func TestUnavailableDependencyPausesWithoutSpendingRetries(t *testing.T) {
+	pool := testutil.NewDB(t)
+	insertEvents(t, pool, "a", "b", "c")
+	errDown := errors.New("connection refused")
+	down := true
+	calls := 0
+	w := &outbox.Worker{Pool: pool, Log: quiet, Backoff: noBackoff, MaxAttempts: 2,
+		IsUnavailable: func(err error) bool { return errors.Is(err, errDown) },
+		Handle: func(context.Context, outbox.Event) error {
+			calls++
+			if down {
+				return errDown
+			}
+			return nil
+		}}
+
+	for i := 0; i < 20; i++ {
+		if _, err := w.ProcessBatch(context.Background()); !errors.Is(err, outbox.ErrPaused) {
+			t.Fatalf("probe %d: err = %v, want ErrPaused", i, err)
+		}
+	}
+	if calls != 20 {
+		t.Fatalf("handler called %d times; a paused batch should stop at the first failure (want 20)", calls)
+	}
+	var maxAttempts int
+	pool.QueryRow(context.Background(), `SELECT max(attempts) FROM outbox`).Scan(&maxAttempts) //nolint:errcheck
+	stats, _ := outbox.ReadStats(context.Background(), pool)
+	if stats.Dead != 0 || stats.Pending != 3 || maxAttempts != 0 {
+		t.Fatalf("after outage: %+v, max attempts %d; want 0 dead, 3 pending, 0 attempts", stats, maxAttempts)
+	}
+
+	down = false
+	if _, err := w.ProcessBatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if stats, _ := outbox.ReadStats(context.Background(), pool); stats.Pending != 0 {
+		t.Fatalf("after recovery: %+v", stats)
+	}
+}
+
 // Several events for the same post in one batch need only one handler call,
 // because the handler re-reads current state.
 func TestEventsForSameAggregateAreCoalesced(t *testing.T) {

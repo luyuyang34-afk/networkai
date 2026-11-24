@@ -40,7 +40,20 @@ type Worker struct {
 	// Backoff returns the delay before retry number `attempt` (1-based).
 	// Defaults to exponential backoff with jitter, capped at 5 minutes.
 	Backoff func(attempt int) time.Duration
+
+	// IsUnavailable reports whether a handler error means a dependency is
+	// down (e.g. Elasticsearch unreachable) rather than this event being
+	// bad. Such errors pause the whole worker instead of spending the
+	// event's retry budget; otherwise a long outage would dead-letter every
+	// pending event.
+	IsUnavailable func(error) bool
+	// MaxPause caps the worker-wide pause while a dependency is down.
+	MaxPause time.Duration
 }
+
+// ErrPaused is returned by ProcessBatch when it stopped early because a
+// dependency is unavailable. Unhandled events stay pending, untouched.
+var ErrPaused = errors.New("outbox paused: dependency unavailable")
 
 func DefaultBackoff(attempt int) time.Duration {
 	base := 500 * time.Millisecond << min(attempt-1, 10)
@@ -54,10 +67,30 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.defaults()
 	w.Log.Info("outbox worker started", "batch", w.BatchSize, "poll", w.PollInterval)
 	lastPrune := time.Time{}
+	pauses := 0
 	for {
 		n, err := w.ProcessBatch(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if errors.Is(err, ErrPaused) {
+			// Circuit open: back off worker-wide (1s, 2s, 4s ... MaxPause)
+			// and probe again. Logged once per outage, not once per event.
+			if pauses == 0 {
+				w.Log.Warn("dependency unavailable; pausing outbox processing", "err", err)
+			}
+			pauses++
+			delay := min(time.Second<<min(pauses-1, 10), w.MaxPause)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(delay):
+			}
+			continue
+		}
+		if pauses > 0 && err == nil && n > 0 {
+			w.Log.Info("dependency recovered; resuming outbox processing", "paused_probes", pauses)
+			pauses = 0
 		}
 		if err != nil {
 			w.Log.Error("outbox batch failed", "err", err)
@@ -90,6 +123,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 	w.defaults()
 	claimed := 0
+	var paused error
 	err := pgx.BeginFunc(ctx, w.Pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, aggregate_type, aggregate_id, event_type, attempts
@@ -121,12 +155,26 @@ func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 				herr = w.handleOne(ctx, ev)
 				results[key] = herr
 			}
+			if herr != nil && w.IsUnavailable(herr) {
+				// Stop here. This event and the rest of the batch stay
+				// pending with their attempt counters unchanged; the
+				// locks are released when the transaction commits.
+				_, err := tx.Exec(ctx, `UPDATE outbox SET last_error = $2 WHERE id = $1`, ev.ID, herr.Error())
+				if err != nil {
+					return err
+				}
+				paused = fmt.Errorf("%w: %v", ErrPaused, herr)
+				return nil
+			}
 			if err := w.record(ctx, tx, ev, herr); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err == nil && paused != nil {
+		return claimed, paused
+	}
 	return claimed, err
 }
 
@@ -188,6 +236,12 @@ func (w *Worker) defaults() {
 	}
 	if w.Log == nil {
 		w.Log = slog.Default()
+	}
+	if w.IsUnavailable == nil {
+		w.IsUnavailable = func(error) bool { return false }
+	}
+	if w.MaxPause <= 0 {
+		w.MaxPause = 30 * time.Second
 	}
 }
 

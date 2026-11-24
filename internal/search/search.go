@@ -316,7 +316,9 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	if resp.StatusCode >= 500 {
+	// 5xx and 429 (Elasticsearch's backpressure signal) mean "try again
+	// later", not "this request is wrong".
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		body := readBody(resp)
 		return nil, fmt.Errorf("%w: status %d: %s", ErrUnavailable, resp.StatusCode, body)
 	}

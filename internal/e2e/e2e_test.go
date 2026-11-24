@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,7 +88,8 @@ func setup(t *testing.T) *env {
 
 	ix := &indexer.Indexer{Posts: st, Index: es}
 	w := &outbox.Worker{Pool: pool, Handle: ix.Handle, Log: quiet,
-		Backoff: func(int) time.Duration { return 0 }, MaxAttempts: 50}
+		Backoff: func(int) time.Duration { return 0 }, MaxAttempts: 3,
+		IsUnavailable: func(err error) bool { return errors.Is(err, search.ErrUnavailable) }}
 	return &env{t: t, pool: pool, api: api, es: es, worker: w, ix: ix}
 }
 
@@ -252,9 +254,13 @@ func TestElasticsearchOutageLosesNoWrites(t *testing.T) {
 		t.Fatalf("search during outage: %d %v", code, body)
 	}
 
-	// The worker keeps trying; events stay pending, none are dropped.
-	for i := 0; i < 3; i++ {
-		e.worker.ProcessBatch(context.Background()) //nolint:errcheck
+	// The worker keeps probing. MaxAttempts is only 3, yet after many probes
+	// nothing is dead-lettered: an unavailable dependency pauses the worker
+	// instead of spending each event's retry budget.
+	for i := 0; i < 10; i++ {
+		if _, err := e.worker.ProcessBatch(context.Background()); !errors.Is(err, outbox.ErrPaused) {
+			t.Fatalf("probe %d during outage: err = %v, want ErrPaused", i, err)
+		}
 	}
 	if s := e.stats(); s.Pending != n+2 || s.Dead != 0 {
 		t.Fatalf("during outage: stats %+v, want %d pending, 0 dead", s, n+2)

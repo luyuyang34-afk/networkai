@@ -182,6 +182,9 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 		PollInterval: cfg.IndexerPoll,
 		MaxAttempts:  cfg.IndexerMaxAttempts,
 		Log:          log,
+		IsUnavailable: func(err error) bool {
+			return errors.Is(err, search.ErrUnavailable)
+		},
 	}
 	return w.Run(ctx)
 }
