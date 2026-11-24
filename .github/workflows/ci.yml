@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: networkai
+          POSTGRES_PASSWORD: networkai
+          POSTGRES_DB: networkai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U networkai"
+          --health-interval 2s --health-retries 30
+      elasticsearch:
+        image: elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports: ["9200:9200"]
+        options: >-
+          --health-cmd "curl -fs localhost:9200/_cluster/health"
+          --health-interval 5s --health-retries 40
+    env:
+      TEST_DATABASE_URL: postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable
+      TEST_ES_URL: http://localhost:9200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l .; exit 1)
+      - name: vet
+        run: go vet ./...
+      - name: test (unit + integration, race detector)
+        run: go test -race -count=1 -coverpkg=./internal/... -coverprofile=cover.out ./...
+      - name: coverage
+        run: go tool cover -func=cover.out | tail -1
+      - name: docker build
+        run: docker build -t networkai .
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
+  e2e:
+    # Full stack: docker compose (postgres, elasticsearch, api, indexer) plus
+    # the production Next.js build, driven by Playwright.
+    runs-on: ubuntu-latest
+    needs: [test, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: start backend
+        run: docker compose up -d --build --wait
+      - name: seed
+        run: ./scripts/seed.sh
+      - name: build web
+        working-directory: web
+        run: npm ci && npm run build && npx playwright install --with-deps chromium
+      - name: playwright
+        working-directory: web
+        run: npx playwright test
+      - name: backend logs on failure
+        if: failure()
+        run: docker compose logs api indexer | tail -200
