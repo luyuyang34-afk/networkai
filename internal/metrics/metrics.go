@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"networkai/internal/assist"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -33,6 +35,11 @@ type Registry struct {
 	outboxHandle   prometheus.Histogram
 	outboxPaused   prometheus.Gauge
 	searchRequests *prometheus.CounterVec
+
+	llmRequests *prometheus.CounterVec
+	llmTokens   *prometheus.CounterVec
+	llmCost     prometheus.Counter
+	llmLatency  prometheus.Histogram
 }
 
 func New() *Registry {
@@ -64,11 +71,29 @@ func New() *Registry {
 			Name: "networkai_search_requests_total",
 			Help: "Search requests by outcome (ok, unavailable, error).",
 		}, []string{"outcome"}),
+		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "networkai_llm_requests_total",
+			Help: "Writing-assistant LLM requests by outcome (ok, error, rate_limited).",
+		}, []string{"outcome"}),
+		llmTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "networkai_llm_tokens_total",
+			Help: "LLM tokens consumed, by direction (input, output).",
+		}, []string{"direction"}),
+		llmCost: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "networkai_llm_cost_usd_total",
+			Help: "Estimated LLM spend in USD (from configured per-token prices).",
+		}),
+		llmLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "networkai_llm_request_duration_seconds",
+			Help:    "LLM call latency.",
+			Buckets: []float64{.1, .25, .5, 1, 2, 4, 8},
+		}),
 	}
 	r.reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.httpRequests, r.httpDuration, r.outboxEvents, r.outboxHandle, r.outboxPaused, r.searchRequests,
+		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency,
 	)
 	return r
 }
@@ -84,6 +109,19 @@ func (r *Registry) ObserveHTTP(route string, status int, d time.Duration) {
 	}
 	r.httpRequests.WithLabelValues(route, strconv.Itoa(status)).Inc()
 	r.httpDuration.WithLabelValues(route).Observe(d.Seconds())
+}
+
+// ObserveLLM implements assist.Observer. Average cost per request is
+// rate(networkai_llm_cost_usd_total) / rate(networkai_llm_requests_total{outcome="ok"}).
+func (r *Registry) ObserveLLM(_ string, outcome string, u assist.Usage, costUSD float64, d time.Duration) {
+	r.llmRequests.WithLabelValues(outcome).Inc()
+	if outcome != "ok" {
+		return
+	}
+	r.llmTokens.WithLabelValues("input").Add(float64(u.InputTokens))
+	r.llmTokens.WithLabelValues("output").Add(float64(u.OutputTokens))
+	r.llmCost.Add(costUSD)
+	r.llmLatency.Observe(d.Seconds())
 }
 
 func (r *Registry) ObserveSearch(outcome string) { r.searchRequests.WithLabelValues(outcome).Inc() }

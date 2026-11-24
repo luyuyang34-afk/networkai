@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"networkai/internal/assist"
 	"networkai/internal/auth"
 	"networkai/internal/feed"
 	"networkai/internal/metrics"
@@ -489,9 +490,52 @@ func grepLines(s, sub string) string {
 	return strings.Join(out, "\n")
 }
 
+type fakeAssistant struct{ err error }
+
+func (f fakeAssistant) Rewrite(_ context.Context, _ int64, _ assist.Mode, draft string) (assist.Result, error) {
+	if f.err != nil {
+		return assist.Result{}, f.err
+	}
+	return assist.Result{Suggestion: "better: " + draft, Model: "m", Usage: assist.Usage{InputTokens: 10, OutputTokens: 5}}, nil
+}
+
 type fakeFeed struct{ err error }
 
 func (f fakeFeed) ForYou(context.Context, int64, string, int) ([]feed.Item, error) { return nil, f.err }
+
+func TestAssistErrorMapping(t *testing.T) {
+	cases := []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{nil, 200, ""},
+		{fmt.Errorf("%w: too long", assist.ErrBadInput), 400, "invalid_input"},
+		{assist.ErrRateLimited, 429, "rate_limited"},
+		{fmt.Errorf("%w: timeout", assist.ErrUnavailable), 503, "assist_unavailable"},
+	}
+	for _, c := range cases {
+		h := newHarness(t, nil)
+		h.h = New(Deps{Users: h.st, Posts: h.st, Search: fakeSearch{}, Media: h.media, Tokens: h.tokens,
+			Assistant: fakeAssistant{err: c.err}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		tok := h.tokenFor("alice")
+		w := h.jsonReq("POST", "/assist/rewrite", tok, map[string]string{"mode": "polish", "draft": "hi"})
+		if w.Code != c.status {
+			t.Errorf("err %v: status %d, want %d", c.err, w.Code, c.status)
+		}
+		if c.code != "" && errCode(t, w) != c.code {
+			t.Errorf("err %v: code mismatch: %s", c.err, w.Body)
+		}
+		if c.err != nil && strings.Contains(w.Body.String(), "timeout") {
+			t.Errorf("internal provider detail leaked: %s", w.Body)
+		}
+	}
+	// Disabled assistant: clear 503, not a 500.
+	h := newHarness(t, nil)
+	if w := h.jsonReq("POST", "/assist/rewrite", h.tokenFor("bob"), map[string]string{"mode": "polish", "draft": "x"}); w.Code != 503 {
+		t.Fatalf("disabled assistant: %d", w.Code)
+	}
+}
 
 func TestFeedSheddingMapsToRetryableError(t *testing.T) {
 	h := newHarness(t, nil)

@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"networkai/internal/assist"
 	"networkai/internal/auth"
 	"networkai/internal/config"
 	"networkai/internal/db"
@@ -158,6 +159,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		Metrics:        m,
 		Likes:          st,
 		Feed:           loadFeed(cfg, st, es, log),
+		Assistant:      loadAssistant(cfg, m, log),
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -245,6 +247,21 @@ func loadFeed(cfg config.Config, st *store.Store, es *search.Client, log *slog.L
 	}
 	return &feed.Service{Signals: st, Index: es, Ranker: r, MaxConcurrent: cfg.FeedMaxConcurrent,
 		Lexical: cfg.FeedLexical}
+}
+
+func loadAssistant(cfg config.Config, m *metrics.Registry, log *slog.Logger) httpapi.Assistant {
+	if cfg.LLMAPIKey == "" {
+		log.Info("OPENAI_API_KEY not set; writing assistant disabled")
+		return nil
+	}
+	return &assist.Service{
+		Provider: &assist.OpenAI{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Model: cfg.LLMModel,
+			HTTP: &http.Client{Timeout: 10 * time.Second}},
+		Timeout:  8 * time.Second,
+		Pricing:  assist.Pricing{InputPerM: cfg.LLMPriceInPerM, OutputPerM: cfg.LLMPriceOutPerM},
+		Limiter:  assist.NewLimiter(cfg.LLMPerUserPerMinute),
+		Observer: m,
+	}
 }
 
 func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {

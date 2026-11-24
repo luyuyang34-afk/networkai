@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"networkai/internal/assist"
 	"networkai/internal/auth"
 	"networkai/internal/feed"
 	"networkai/internal/media"
@@ -476,6 +477,43 @@ func (s *Server) forYou(w http.ResponseWriter, r *http.Request) {
 		out.Items[i] = rankedPost{postResponse: resp[i], Ranking: items[i]}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// rewrite asks the writing assistant to improve a draft. Every failure mode
+// maps to a clear code the editor can show; the draft itself is never lost
+// because the client keeps it.
+func (s *Server) rewrite(w http.ResponseWriter, r *http.Request) {
+	if s.assistant == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "assist_unavailable", "writing assistant is not enabled")
+		return
+	}
+	var body struct {
+		Mode  string `json:"mode"`
+		Draft string `json:"draft"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_json", `body must be {"mode": "polish|shorten|hashtags", "draft": "..."}`)
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	res, err := s.assistant.Rewrite(r.Context(), p.UserID, assist.Mode(body.Mode), body.Draft)
+	switch {
+	case errors.Is(err, assist.ErrBadInput):
+		writeError(w, r, http.StatusBadRequest, "invalid_input", err.Error())
+	case errors.Is(err, assist.ErrRateLimited):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, r, http.StatusTooManyRequests, "rate_limited", "too many assistant requests; try again in a minute")
+	case errors.Is(err, assist.ErrUnavailable):
+		s.log.WarnContext(r.Context(), "assistant unavailable", "err", err)
+		writeError(w, r, http.StatusServiceUnavailable, "assist_unavailable",
+			"the writing assistant is temporarily unavailable; your draft is unchanged")
+	case err != nil:
+		internalError(w, r, s.log, err)
+	default:
+		writeJSON(w, http.StatusOK, res)
+	}
 }
 
 func encodePageCursor(c store.PageCursor) string {

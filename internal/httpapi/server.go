@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"networkai/internal/assist"
 	"networkai/internal/auth"
 	"networkai/internal/feed"
 	"networkai/internal/media"
@@ -39,6 +40,11 @@ type Likes interface {
 	LikeInfo(ctx context.Context, postIDs []string, userID int64) (map[string]int, map[string]bool, error)
 }
 
+// Assistant rewrites drafts with an LLM; optional.
+type Assistant interface {
+	Rewrite(ctx context.Context, userID int64, mode assist.Mode, draft string) (assist.Result, error)
+}
+
 // Feed is the personalised feed; optional (requires trained models).
 type Feed interface {
 	ForYou(ctx context.Context, userID int64, username string, limit int) ([]feed.Item, error)
@@ -67,9 +73,10 @@ type Deps struct {
 	// LocalMediaDir, if set, is served at /media/ (local media backend only).
 	LocalMediaDir string
 	// Metrics, if set, records request metrics and is served at /metrics.
-	Metrics *metrics.Registry
-	Likes   Likes
-	Feed    Feed
+	Metrics   *metrics.Registry
+	Likes     Likes
+	Feed      Feed
+	Assistant Assistant
 }
 
 type Server struct {
@@ -84,13 +91,14 @@ type Server struct {
 	metrics   *metrics.Registry
 	likes     Likes
 	feed      Feed
+	assistant Assistant
 }
 
 func New(d Deps) http.Handler {
 	s := &Server{
 		users: d.Users, posts: d.Posts, search: d.Search, media: d.Media, ready: d.Ready,
 		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes, metrics: d.Metrics,
-		likes: d.Likes, feed: d.Feed,
+		likes: d.Likes, feed: d.Feed, assistant: d.Assistant,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -112,6 +120,7 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /posts/{id}/like", s.requireAuth(s.likePost))
 	mux.HandleFunc("DELETE /posts/{id}/like", s.requireAuth(s.unlikePost))
 	mux.HandleFunc("GET /feed", s.requireAuth(s.forYou))
+	mux.HandleFunc("POST /assist/rewrite", s.requireAuth(s.rewrite))
 	mux.HandleFunc("POST /posts", s.requireAuth(s.createPost))
 	mux.HandleFunc("PATCH /posts/{id}", s.requireAuth(s.updatePost))
 	mux.HandleFunc("DELETE /posts/{id}", s.requireAuth(s.deletePost))

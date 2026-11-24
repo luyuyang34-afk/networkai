@@ -45,6 +45,14 @@ type Config struct {
 	FeedMaxConcurrent int
 	FeedLexical       bool
 
+	// Writing assistant (OpenAI-compatible). Disabled when LLMAPIKey is empty.
+	LLMBaseURL          string
+	LLMAPIKey           string
+	LLMModel            string
+	LLMPriceInPerM      float64 // USD per 1M input tokens; 0 = unknown
+	LLMPriceOutPerM     float64
+	LLMPerUserPerMinute int
+
 	IndexerBatchSize   int
 	IndexerPoll        time.Duration
 	IndexerMaxAttempts int
@@ -65,6 +73,9 @@ func Load() (Config, error) {
 		GCSBucket:          os.Getenv("GCS_BUCKET"),
 		CORSOrigins:        splitList(env("CORS_ORIGINS", "http://localhost:3000")),
 		ModelDir:           env("MODEL_DIR", "./models"),
+		LLMBaseURL:         env("LLM_BASE_URL", "https://api.openai.com/v1"),
+		LLMAPIKey:          os.Getenv("OPENAI_API_KEY"),
+		LLMModel:           env("LLM_MODEL", "gpt-4o-mini"),
 		IndexerBatchSize:   100,
 		IndexerMaxAttempts: 10,
 	}
@@ -77,6 +88,9 @@ func Load() (Config, error) {
 	c.IndexerMaxAttempts = intEnv("INDEXER_MAX_ATTEMPTS", c.IndexerMaxAttempts, &errs)
 	c.FeedMaxConcurrent = intEnv("FEED_MAX_CONCURRENT", 2, &errs)
 	c.FeedLexical = os.Getenv("FEED_LEXICAL") == "true"
+	c.LLMPerUserPerMinute = intEnv("LLM_PER_USER_PER_MINUTE", 20, &errs)
+	c.LLMPriceInPerM = floatEnv("LLM_PRICE_IN_PER_M", &errs)
+	c.LLMPriceOutPerM = floatEnv("LLM_PRICE_OUT_PER_M", &errs)
 
 	if len(c.JWTSecret) < 32 {
 		errs = append(errs, errors.New("JWT_SECRET must be set and at least 32 bytes"))
@@ -111,6 +125,19 @@ func intEnv(key string, def int, errs *[]error) int {
 		return def
 	}
 	return n
+}
+
+func floatEnv(key string, errs *[]error) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 {
+		*errs = append(*errs, fmt.Errorf("%s must be a non-negative number, got %q", key, v))
+		return 0
+	}
+	return f
 }
 
 func durationEnv(key string, def time.Duration, errs *[]error) time.Duration {
