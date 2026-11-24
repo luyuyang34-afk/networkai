@@ -55,6 +55,18 @@ func (c *Client) WithAlias(alias string) *Client {
 
 func (c *Client) physicalName() string { return c.alias + "_v1" }
 
+// Alias returns the alias this client reads and writes.
+func (c *Client) Alias() string { return c.alias }
+
+// Sink is anything that accepts versioned document writes.
+type Sink interface {
+	Upsert(ctx context.Context, doc Doc, version int64) (bool, error)
+	BulkUpsert(ctx context.Context, docs []VersionedDoc) (BulkResult, error)
+}
+
+// Into returns a client whose writes target a specific physical index.
+func (c *Client) Into(index string) Sink { return c.WithAlias(index) }
+
 // Doc is the denormalised search document for one post.
 type Doc struct {
 	ID        string    `json:"id"`
@@ -68,7 +80,18 @@ type Doc struct {
 	// time). A real delete would let a late, stale write re-create the doc;
 	// a tombstone carries a version that rejects it. See ADR 0002.
 	Deleted bool `json:"deleted"`
+	// Embedding is the post's semantic vector (see package embed). Omitted
+	// when no embedding model is configured or the text has no known terms.
+	Embedding []float32 `json:"embedding,omitempty"`
 }
+
+// EmbeddingDims must match the trained model (models/lsa.json).
+const EmbeddingDims = 64
+
+// embeddingMapping is added to the index with PUT _mapping. Adding a new
+// field is one of the few mapping changes Elasticsearch allows in place;
+// changing an existing field's type would need a new index and an alias swap.
+var embeddingMapping = fmt.Sprintf(`{"properties":{"embedding":{"type":"dense_vector","dims":%d,"index":true,"similarity":"cosine"}}}`, EmbeddingDims)
 
 // indexDefinition is the settings + mapping for the posts index.
 //
@@ -135,7 +158,7 @@ func (c *Client) EnsureIndex(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		return nil
+		return c.ensureEmbeddingField(ctx)
 	}
 	def := strings.Replace(indexDefinition, "__ALIAS__", c.alias, 1)
 	resp, err = c.do(ctx, http.MethodPut, "/"+c.physicalName(), strings.NewReader(def))
@@ -145,11 +168,200 @@ func (c *Client) EnsureIndex(ctx context.Context) error {
 	if resp.StatusCode == http.StatusBadRequest {
 		body := readBody(resp)
 		if strings.Contains(body, "resource_already_exists_exception") {
-			return nil // another process won the race
+			return c.ensureEmbeddingField(ctx) // another process won the race
 		}
 		return fmt.Errorf("create index: %s", body)
 	}
+	if err := expect(resp, http.StatusOK); err != nil {
+		return err
+	}
+	return c.ensureEmbeddingField(ctx)
+}
+
+// CreateIndex creates a new physical index with the current definition but
+// without attaching the alias (used by blue/green rebuilds).
+func (c *Client) CreateIndex(ctx context.Context, name string) error {
+	def := strings.Replace(indexDefinition, `"aliases": {"__ALIAS__": {}}`, `"aliases": {}`, 1)
+	resp, err := c.do(ctx, http.MethodPut, "/"+name, strings.NewReader(def))
+	if err != nil {
+		return err
+	}
+	if err := expect(resp, http.StatusOK); err != nil {
+		return err
+	}
+	resp, err = c.do(ctx, http.MethodPut, "/"+name+"/_mapping", strings.NewReader(embeddingMapping))
+	if err != nil {
+		return err
+	}
 	return expect(resp, http.StatusOK)
+}
+
+// SwapAlias atomically points the alias at newIndex and detaches it from
+// every other index, returning the indices it was detached from. Readers
+// never see a moment with no index or two indices behind the alias.
+func (c *Client) SwapAlias(ctx context.Context, newIndex string) ([]string, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/_alias/"+c.alias, nil)
+	if err != nil {
+		return nil, err
+	}
+	var old []string
+	if resp.StatusCode == http.StatusOK {
+		var m map[string]any
+		json.NewDecoder(resp.Body).Decode(&m) //nolint:errcheck
+		resp.Body.Close()
+		for idx := range m {
+			if idx != newIndex {
+				old = append(old, idx)
+			}
+		}
+	} else {
+		resp.Body.Close()
+	}
+	actions := []any{map[string]any{"add": map[string]any{"index": newIndex, "alias": c.alias}}}
+	for _, idx := range old {
+		actions = append(actions, map[string]any{"remove": map[string]any{"index": idx, "alias": c.alias}})
+	}
+	body, _ := json.Marshal(map[string]any{"actions": actions})
+	resp, err = c.do(ctx, http.MethodPost, "/_aliases", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	return old, expect(resp, http.StatusOK)
+}
+
+func (c *Client) DeleteIndex(ctx context.Context, name string) error {
+	resp, err := c.do(ctx, http.MethodDelete, "/"+name, nil)
+	if err != nil {
+		return err
+	}
+	return expect(resp, http.StatusOK)
+}
+
+// ensureEmbeddingField adds the embedding field to an existing index
+// (idempotent: re-putting an identical mapping is a no-op).
+func (c *Client) ensureEmbeddingField(ctx context.Context) error {
+	resp, err := c.do(ctx, http.MethodPut, "/"+c.alias+"/_mapping", strings.NewReader(embeddingMapping))
+	if err != nil {
+		return err
+	}
+	return expect(resp, http.StatusOK)
+}
+
+// Embeddings returns the stored embedding for each id that has one (_mget).
+func (c *Client) Embeddings(ctx context.Context, ids []string) (map[string][]float32, error) {
+	if len(ids) == 0 {
+		return map[string][]float32{}, nil
+	}
+	body, _ := json.Marshal(map[string]any{"ids": ids})
+	resp, err := c.do(ctx, http.MethodPost, "/"+c.alias+"/_mget?_source_includes=embedding", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mget: status %d: %s", resp.StatusCode, readBody(resp))
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Docs []struct {
+			ID     string `json:"_id"`
+			Found  bool   `json:"found"`
+			Source struct {
+				Embedding []float32 `json:"embedding"`
+			} `json:"_source"`
+		} `json:"docs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	res := make(map[string][]float32, len(out.Docs))
+	for _, d := range out.Docs {
+		if d.Found && len(d.Source.Embedding) > 0 {
+			res[d.ID] = d.Source.Embedding
+		}
+	}
+	return res, nil
+}
+
+// CandidateQuery describes one retrieval source for the personalised feed.
+// Exactly one of Vector (kNN) or LikeIDs (more_like_this) may be set; with
+// neither, the newest posts are returned.
+type CandidateQuery struct {
+	Since         time.Time
+	Size          int
+	Vector        []float32
+	LikeIDs       []string
+	ExcludeIDs    []string
+	ExcludeAuthor string
+}
+
+// Candidates runs one retrieval source. Results include embeddings, which the
+// ranker needs for its similarity feature.
+func (c *Client) Candidates(ctx context.Context, q CandidateQuery) ([]Doc, error) {
+	filter := []any{
+		map[string]any{"term": map[string]any{"deleted": false}},
+		map[string]any{"range": map[string]any{"created_at": map[string]any{"gte": q.Since.UTC().Format(time.RFC3339)}}},
+	}
+	var mustNot []any
+	if len(q.ExcludeIDs) > 0 {
+		mustNot = append(mustNot, map[string]any{"ids": map[string]any{"values": q.ExcludeIDs}})
+	}
+	if q.ExcludeAuthor != "" {
+		mustNot = append(mustNot, map[string]any{"term": map[string]any{"author": q.ExcludeAuthor}})
+	}
+	boolQ := map[string]any{"filter": filter, "must_not": mustNot}
+	body := map[string]any{"size": q.Size, "track_total_hits": false}
+
+	switch {
+	case len(q.Vector) > 0:
+		// Approximate kNN (HNSW). Filters apply *during* the graph search,
+		// so all k results satisfy them.
+		body["knn"] = map[string]any{
+			"field": "embedding", "query_vector": q.Vector, "k": q.Size,
+			"num_candidates": max(q.Size*3, 100),
+			"filter":         map[string]any{"bool": boolQ},
+		}
+	case len(q.LikeIDs) > 0:
+		like := make([]any, len(q.LikeIDs))
+		for i, id := range q.LikeIDs {
+			like[i] = map[string]any{"_index": c.alias, "_id": id}
+		}
+		boolQ["must"] = []any{map[string]any{"more_like_this": map[string]any{
+			"fields": []string{"message"}, "like": like,
+			"min_term_freq": 1, "min_doc_freq": 2, "max_query_terms": 25,
+		}}}
+		body["query"] = map[string]any{"bool": boolQ}
+	default:
+		body["query"] = map[string]any{"bool": boolQ}
+		body["sort"] = []any{map[string]any{"created_at": "desc"}}
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/"+c.alias+"/_search", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("candidates: status %d: %s", resp.StatusCode, readBody(resp))
+	}
+	defer resp.Body.Close()
+	var sr struct {
+		Hits struct {
+			Hits []struct {
+				Source Doc `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		return nil, err
+	}
+	docs := make([]Doc, len(sr.Hits.Hits))
+	for i, h := range sr.Hits.Hits {
+		docs[i] = h.Source
+	}
+	return docs, nil
 }
 
 // Upsert writes doc with an external version. Elasticsearch only accepts the
@@ -341,6 +553,7 @@ func (c *Client) Search(ctx context.Context, q Query) (Result, error) {
 	}
 
 	body := map[string]any{
+		"_source":          map[string]any{"excludes": []string{"embedding"}},
 		"size":             q.Limit + 1, // one extra to detect a next page
 		"query":            map[string]any{"bool": boolQ},
 		"sort":             sort,
