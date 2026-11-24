@@ -16,6 +16,9 @@ import (
 
 type Config struct {
 	HTTPAddr string
+	// MetricsAddr is where the indexer serves /metrics (the API serves it on
+	// HTTPAddr).
+	MetricsAddr string
 
 	DatabaseURL string
 
@@ -43,6 +46,7 @@ type Config struct {
 func Load() (Config, error) {
 	c := Config{
 		HTTPAddr:           env("HTTP_ADDR", ":8080"),
+		MetricsAddr:        env("METRICS_ADDR", ":9091"),
 		DatabaseURL:        env("DATABASE_URL", "postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable"),
 		ESURL:              env("ES_URL", "http://localhost:9200"),
 		ESUsername:         os.Getenv("ES_USERNAME"),

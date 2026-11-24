@@ -4,11 +4,13 @@
 //	networkai indexer   outbox worker: PostgreSQL -> Elasticsearch
 //	networkai migrate   apply database migrations and exit
 //	networkai reindex   rebuild the search index from PostgreSQL and exit
+//	networkai sweep-media [-dry-run]  delete media files no live post references
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,7 +24,9 @@ import (
 	"networkai/internal/db"
 	"networkai/internal/httpapi"
 	"networkai/internal/indexer"
+	"networkai/internal/maintenance"
 	"networkai/internal/media"
+	"networkai/internal/metrics"
 	"networkai/internal/outbox"
 	"networkai/internal/search"
 	"networkai/internal/store"
@@ -86,6 +90,27 @@ func run(ctx context.Context, cmd string, log *slog.Logger) error {
 		n, err := ix.Reindex(ctx)
 		log.Info("reindex finished", "posts", n)
 		return err
+	case "sweep-media":
+		fs := flag.NewFlagSet("sweep-media", flag.ContinueOnError)
+		dry := fs.Bool("dry-run", false, "only report orphans")
+		grace := fs.Duration("grace", time.Hour, "skip files younger than this")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		ms, _, err := openMedia(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		lister, ok := ms.(interface {
+			media.Lister
+			Delete(context.Context, string) error
+		})
+		if !ok {
+			return fmt.Errorf("media backend %q cannot list objects", cfg.MediaBackend)
+		}
+		res, err := maintenance.SweepOrphanedMedia(ctx, lister, st, *grace, *dry, log)
+		log.Info("media sweep finished", "scanned", res.Scanned, "orphans", res.Orphans, "deleted", res.Deleted, "dry_run", *dry)
+		return err
 	default:
 		return fmt.Errorf("unknown command %q", cmd)
 	}
@@ -101,21 +126,9 @@ func (r readiness) OutboxStats(ctx context.Context) (outbox.Stats, error) {
 }
 
 func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpool.Pool, es *search.Client, log *slog.Logger) error {
-	var ms media.Store
-	var localDir string
-	switch cfg.MediaBackend {
-	case "gcs":
-		g, err := media.NewGCS(ctx, cfg.GCSBucket)
-		if err != nil {
-			return err
-		}
-		ms = g
-	default:
-		l, err := media.NewLocal(cfg.MediaDir, cfg.MediaBaseURL)
-		if err != nil {
-			return err
-		}
-		ms, localDir = l, cfg.MediaDir
+	ms, localDir, err := openMedia(ctx, cfg)
+	if err != nil {
+		return err
 	}
 
 	handler := httpapi.New(httpapi.Deps{
@@ -126,6 +139,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		CORSOrigins:    cfg.CORSOrigins,
 		MaxUploadBytes: cfg.MaxUploadBytes,
 		LocalMediaDir:  localDir,
+		Metrics:        apiMetrics(pool),
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -174,8 +188,15 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 		case <-time.After(3 * time.Second):
 		}
 	}
+	m := metrics.New()
+	m.RegisterOutboxBacklog(pool)
+	go serveMetrics(ctx, cfg.MetricsAddr, m, log)
+	go purgeTombstonesPeriodically(ctx, es, log)
+
 	ix := &indexer.Indexer{Posts: st, Index: es, Log: log}
 	w := &outbox.Worker{
+		OnEvent:      m.ObserveOutboxEvent,
+		OnPause:      m.SetOutboxPaused,
 		Pool:         pool,
 		Handle:       ix.Handle,
 		BatchSize:    cfg.IndexerBatchSize,
@@ -187,6 +208,55 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 		},
 	}
 	return w.Run(ctx)
+}
+
+func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {
+	if cfg.MediaBackend == "gcs" {
+		g, err := media.NewGCS(ctx, cfg.GCSBucket)
+		return g, "", err
+	}
+	l, err := media.NewLocal(cfg.MediaDir, cfg.MediaBaseURL)
+	return l, cfg.MediaDir, err
+}
+
+func apiMetrics(pool *pgxpool.Pool) *metrics.Registry {
+	m := metrics.New()
+	m.RegisterOutboxBacklog(pool)
+	return m
+}
+
+// purgeTombstonesPeriodically removes week-old deleted-post tombstones. Running
+// it in every indexer replica is harmless: delete_by_query is idempotent.
+func purgeTombstonesPeriodically(ctx context.Context, es *search.Client, log *slog.Logger) {
+	t := time.NewTicker(6 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := es.PurgeTombstones(ctx, 7*24*time.Hour)
+			if err != nil {
+				log.Warn("tombstone purge failed", "err", err)
+				continue
+			}
+			log.Info("tombstones purged", "count", n)
+		}
+	}
+}
+
+func serveMetrics(ctx context.Context, addr string, m *metrics.Registry, log *slog.Logger) {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
+	log.Info("indexer metrics listening", "addr", addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Error("metrics server failed", "err", err)
+	}
 }
 
 func connectWithRetry(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, error) {
