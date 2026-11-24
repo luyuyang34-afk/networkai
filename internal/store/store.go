@@ -266,6 +266,24 @@ func (s *Store) ForEachPostID(ctx context.Context, batch int, fn func(uuid.UUID)
 	}
 }
 
+// MediaKeysInUse returns which of keys are referenced by a live post.
+func (s *Store) MediaKeysInUse(ctx context.Context, keys []string) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT media_key FROM posts WHERE media_key = ANY($1) AND deleted_at IS NULL`, keys)
+	if err != nil {
+		return nil, err
+	}
+	used, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(used))
+	for _, k := range used {
+		out[k] = true
+	}
+	return out, nil
+}
+
 func enqueuePostChanged(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	_, err := tx.Exec(ctx,
 		`INSERT INTO outbox (aggregate_type, aggregate_id, event_type) VALUES ($1, $2, $3)`,

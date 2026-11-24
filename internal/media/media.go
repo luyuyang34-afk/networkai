@@ -14,8 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 )
 
 type Store interface {
@@ -40,6 +42,17 @@ func Kind(head []byte, filename string) (kind, contentType string, ok bool) {
 		return "video", "video/quicktime", true
 	}
 	return "", ct, false
+}
+
+// Object is a stored media file, as seen by the orphan sweep.
+type Object struct {
+	Key     string
+	ModTime time.Time
+}
+
+// Lister is implemented by stores that can enumerate their objects.
+type Lister interface {
+	List(ctx context.Context, fn func(Object) error) error
 }
 
 // ---------- local filesystem ----------
@@ -87,6 +100,26 @@ func (s *LocalStore) Put(_ context.Context, key string, r io.Reader, _ string) (
 	return s.BaseURL + "/" + key, nil
 }
 
+func (s *LocalStore) List(_ context.Context, fn func(Object) error) error {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue // skip in-progress ".upload-*" temp files
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // removed concurrently
+		}
+		if err := fn(Object{Key: e.Name(), ModTime: info.ModTime()}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *LocalStore) Delete(_ context.Context, key string) error {
 	p, err := s.path(key)
 	if err != nil {
@@ -127,6 +160,22 @@ func (s *GCSStore) Put(ctx context.Context, key string, r io.Reader, contentType
 		return "", err
 	}
 	return fmt.Sprintf("https://storage.googleapis.com/%s/%s", s.bucket, key), nil
+}
+
+func (s *GCSStore) List(ctx context.Context, fn func(Object) error) error {
+	it := s.client.Bucket(s.bucket).Objects(ctx, nil)
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := fn(Object{Key: attrs.Name, ModTime: attrs.Updated}); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *GCSStore) Delete(ctx context.Context, key string) error {
