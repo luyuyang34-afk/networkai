@@ -12,6 +12,8 @@ export type Post = {
   media_url?: string;
   created_at: string;
   updated_at: string;
+  like_count: number;
+  liked: boolean;
 };
 
 export type Page<T> = { items: T[]; next_cursor?: string };
@@ -96,18 +98,22 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
+  // Read endpoints send the token when present so the server can fill `liked`.
   listPosts: (p: { author?: string; cursor?: string; limit?: number }) => {
     const q = new URLSearchParams({ limit: String(p.limit ?? 20) });
     if (p.author) q.set("author", p.author);
     if (p.cursor) q.set("cursor", p.cursor);
-    return request<Page<Post>>(`/posts?${q}`);
+    return request<Page<Post>>(`/posts?${q}`, { auth: true });
   },
   searchPosts: (p: { q: string; type?: string; cursor?: string }) => {
     const q = new URLSearchParams({ q: p.q, limit: "20" });
     if (p.type) q.set("type", p.type);
     if (p.cursor) q.set("cursor", p.cursor);
-    return request<Page<Post>>(`/posts/search?${q}`);
+    return request<Page<Post>>(`/posts/search?${q}`, { auth: true });
   },
+  forYou: () => request<Page<Post>>(`/feed?limit=30`, { auth: true }),
+  like: (id: string) => request<void>(`/posts/${id}/like`, { method: "POST", auth: true }),
+  unlike: (id: string) => request<void>(`/posts/${id}/like`, { method: "DELETE", auth: true }),
   createPost: (message: string, file?: File | null) => {
     const fd = new FormData();
     fd.set("message", message);

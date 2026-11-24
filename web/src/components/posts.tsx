@@ -9,7 +9,7 @@ import {
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
-import { ImagePlus, Loader2, Pencil, Trash2, X } from "lucide-react";
+import { Heart, ImagePlus, Loader2, Pencil, Trash2, X } from "lucide-react";
 import { ApiError, api, type Page, type Post } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { timeAgo } from "@/lib/utils";
@@ -134,6 +134,15 @@ export function PostCard({ post }: { post: Post }) {
     },
   });
 
+  // Optimistic like: flip immediately everywhere the post is cached; on
+  // failure, refetch to restore the server's truth.
+  const like = useMutation({
+    mutationFn: (next: boolean) => (next ? api.like(post.id) : api.unlike(post.id)),
+    onMutate: (next) =>
+      updateCachedPost(qc, post.id, (p) => ({ ...p, liked: next, like_count: p.like_count + (next ? 1 : -1) })),
+    onError: () => qc.invalidateQueries({ queryKey: ["posts"] }),
+  });
+
   // Optimistic delete: hide immediately, restore by refetching on failure.
   const remove = useMutation({
     mutationFn: () => api.deletePost(post.id),
@@ -192,6 +201,20 @@ export function PostCard({ post }: { post: Post }) {
       {post.media_url && post.media_type === "video" && (
         <video src={post.media_url} controls preload="metadata" className="max-h-96 rounded-md" />
       )}
+
+      <div className="flex items-center gap-1 text-sm text-muted-foreground">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={post.liked ? "Unlike" : "Like"}
+          aria-pressed={post.liked}
+          disabled={!username || like.isPending}
+          onClick={() => like.mutate(!post.liked)}
+        >
+          <Heart className={post.liked ? "h-4 w-4 fill-red-500 text-red-500" : "h-4 w-4"} />
+        </Button>
+        <span data-testid="like-count">{post.like_count}</span>
+      </div>
     </Card>
   );
 }
@@ -233,10 +256,14 @@ export function PostList({
   if (!enabled) return null;
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
   if (q.isError) {
-    const unavailable = q.error instanceof ApiError && q.error.code === "search_unavailable";
+    const code = q.error instanceof ApiError ? q.error.code : "";
     return (
       <Alert>
-        {unavailable ? "Search is temporarily unavailable. The feed and posting still work." : errorText(q.error)}
+        {code === "search_unavailable"
+          ? "Search is temporarily unavailable. The feed and posting still work."
+          : code === "feed_unavailable"
+            ? "Recommendations are temporarily unavailable. The Latest tab still works."
+            : errorText(q.error)}
       </Alert>
     );
   }

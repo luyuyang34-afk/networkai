@@ -81,3 +81,24 @@ test("expired session sends you to login", async ({ page }) => {
   await expect(page.getByRole("navigation").getByRole("link", { name: "Log in" })).toBeVisible();
   await expect(page.getByLabel("New post")).toHaveCount(0);
 });
+
+test("like toggles optimistically and persists", async ({ page }) => {
+  await signUp(page);
+  await page.goto("/u/alice"); // created by scripts/seed.sh
+  const post = page.getByTestId("post").first();
+  const count = post.getByTestId("like-count");
+  const before = Number(await count.textContent());
+  await post.getByRole("button", { name: "Like" }).click();
+  await expect(count).toHaveText(String(before + 1));
+  await page.reload();
+  await expect(page.getByTestId("post").first().getByRole("button", { name: "Unlike" })).toBeVisible();
+  await page.getByTestId("post").first().getByRole("button", { name: "Unlike" }).click();
+  await expect(page.getByTestId("post").first().getByTestId("like-count")).toHaveText(String(before));
+});
+
+test("For you tab shows recommendations", async ({ page }) => {
+  await signUp(page);
+  await page.getByRole("tab", { name: "For you" }).click();
+  // A brand-new user is cold-start: the fresh source still returns posts.
+  await expect(page.getByTestId("post").first()).toBeVisible();
+});
