@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"networkai/internal/auth"
+	"networkai/internal/metrics"
 	"networkai/internal/search"
 	"networkai/internal/store"
 
@@ -435,4 +436,37 @@ func TestPageCursorRoundTrip(t *testing.T) {
 			t.Errorf("cursor %q should be rejected", bad)
 		}
 	}
+}
+
+func TestMetricsUseRoutePatternNotRawPath(t *testing.T) {
+	m := metrics.New()
+	h := New(Deps{Users: newFakeStore(), Posts: newFakeStore(), Search: fakeSearch{}, Metrics: m,
+		Tokens: auth.NewTokens([]byte(strings.Repeat("k", 32)), time.Hour),
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil))})
+	id := uuid.NewString()
+	for _, p := range []string{"/posts/" + id, "/posts/" + uuid.NewString(), "/no/such/route"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", p, nil))
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `networkai_http_requests_total{route="GET /posts/{id}",status="404"} 2`) {
+		t.Errorf("expected both post lookups under one route-pattern series:\n%s", grepLines(body, "http_requests_total"))
+	}
+	if strings.Contains(body, id) {
+		t.Error("raw id leaked into metric labels (cardinality explosion)")
+	}
+	if !strings.Contains(body, `route="unmatched"`) {
+		t.Error("unknown paths should share a single 'unmatched' series")
+	}
+}
+
+func grepLines(s, sub string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.Contains(l, sub) {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
 }

@@ -49,6 +49,10 @@ type Worker struct {
 	IsUnavailable func(error) bool
 	// MaxPause caps the worker-wide pause while a dependency is down.
 	MaxPause time.Duration
+
+	// Optional observability hooks.
+	OnEvent func(result string, d time.Duration) // result: ok|retry|dead|paused
+	OnPause func(paused bool)
 }
 
 // ErrPaused is returned by ProcessBatch when it stopped early because a
@@ -78,6 +82,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			// and probe again. Logged once per outage, not once per event.
 			if pauses == 0 {
 				w.Log.Warn("dependency unavailable; pausing outbox processing", "err", err)
+				w.OnPause(true)
 			}
 			pauses++
 			delay := min(time.Second<<min(pauses-1, 10), w.MaxPause)
@@ -90,6 +95,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		if pauses > 0 && err == nil && n > 0 {
 			w.Log.Info("dependency recovered; resuming outbox processing", "paused_probes", pauses)
+			w.OnPause(false)
 			pauses = 0
 		}
 		if err != nil {
@@ -151,8 +157,11 @@ func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 		for _, ev := range events {
 			key := ev.AggregateType + "/" + ev.AggregateID
 			herr, seen := results[key]
+			var took time.Duration
 			if !seen {
+				start := time.Now()
 				herr = w.handleOne(ctx, ev)
+				took = time.Since(start)
 				results[key] = herr
 			}
 			if herr != nil && w.IsUnavailable(herr) {
@@ -164,11 +173,14 @@ func (w *Worker) ProcessBatch(ctx context.Context) (int, error) {
 					return err
 				}
 				paused = fmt.Errorf("%w: %v", ErrPaused, herr)
+				w.OnEvent("paused", took)
 				return nil
 			}
-			if err := w.record(ctx, tx, ev, herr); err != nil {
+			result, err := w.record(ctx, tx, ev, herr)
+			if err != nil {
 				return err
 			}
+			w.OnEvent(result, took)
 		}
 		return nil
 	})
@@ -189,10 +201,11 @@ func (w *Worker) handleOne(ctx context.Context, ev Event) (err error) {
 	return w.Handle(hctx, ev)
 }
 
-func (w *Worker) record(ctx context.Context, tx pgx.Tx, ev Event, herr error) error {
+// record persists the outcome of one event and returns ok, retry or dead.
+func (w *Worker) record(ctx context.Context, tx pgx.Tx, ev Event, herr error) (string, error) {
 	if herr == nil {
 		_, err := tx.Exec(ctx, `UPDATE outbox SET processed_at = now(), last_error = NULL WHERE id = $1`, ev.ID)
-		return err
+		return "ok", err
 	}
 	attempt := ev.Attempts + 1
 	if attempt >= w.MaxAttempts || errors.Is(herr, ErrPermanent) {
@@ -200,7 +213,7 @@ func (w *Worker) record(ctx context.Context, tx pgx.Tx, ev Event, herr error) er
 		_, err := tx.Exec(ctx,
 			`UPDATE outbox SET attempts = $2, last_error = $3, dead_at = now() WHERE id = $1`,
 			ev.ID, attempt, herr.Error())
-		return err
+		return "dead", err
 	}
 	delay := w.Backoff(attempt)
 	w.Log.Warn("outbox event failed, will retry", "id", ev.ID, "aggregate", ev.AggregateID,
@@ -208,7 +221,7 @@ func (w *Worker) record(ctx context.Context, tx pgx.Tx, ev Event, herr error) er
 	_, err := tx.Exec(ctx,
 		`UPDATE outbox SET attempts = $2, last_error = $3, next_attempt_at = now() + $4 * interval '1 millisecond' WHERE id = $1`,
 		ev.ID, attempt, herr.Error(), delay.Milliseconds())
-	return err
+	return "retry", err
 }
 
 // Prune deletes processed events older than `olderThan`.
@@ -242,6 +255,12 @@ func (w *Worker) defaults() {
 	}
 	if w.MaxPause <= 0 {
 		w.MaxPause = 30 * time.Second
+	}
+	if w.OnEvent == nil {
+		w.OnEvent = func(string, time.Duration) {}
+	}
+	if w.OnPause == nil {
+		w.OnPause = func(bool) {}
 	}
 }
 

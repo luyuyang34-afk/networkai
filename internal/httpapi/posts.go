@@ -295,6 +295,7 @@ func (s *Server) searchPosts(w http.ResponseWriter, r *http.Request) {
 	res, err := s.search.Search(r.Context(), search.Query{
 		Text: q.Get("q"), Author: q.Get("author"), MediaType: mt, Limit: limit, Cursor: q.Get("cursor"),
 	})
+	s.observeSearch(err)
 	switch {
 	case errors.Is(err, search.ErrBadCursor):
 		writeError(w, r, http.StatusBadRequest, "invalid_cursor", "cursor is invalid")
@@ -313,6 +314,20 @@ func (s *Server) searchPosts(w http.ResponseWriter, r *http.Request) {
 		resp.Items[i] = docToResponse(d)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) observeSearch(err error) {
+	if s.metrics == nil {
+		return
+	}
+	switch {
+	case err == nil:
+		s.metrics.ObserveSearch("ok")
+	case errors.Is(err, search.ErrUnavailable):
+		s.metrics.ObserveSearch("unavailable")
+	default:
+		s.metrics.ObserveSearch("error")
+	}
 }
 
 func encodePageCursor(c store.PageCursor) string {

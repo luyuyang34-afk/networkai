@@ -10,6 +10,7 @@ import (
 
 	"networkai/internal/auth"
 	"networkai/internal/media"
+	"networkai/internal/metrics"
 	"networkai/internal/outbox"
 	"networkai/internal/search"
 	"networkai/internal/store"
@@ -52,6 +53,8 @@ type Deps struct {
 	MaxUploadBytes int64
 	// LocalMediaDir, if set, is served at /media/ (local media backend only).
 	LocalMediaDir string
+	// Metrics, if set, records request metrics and is served at /metrics.
+	Metrics *metrics.Registry
 }
 
 type Server struct {
@@ -63,12 +66,13 @@ type Server struct {
 	tokens    *auth.Tokens
 	log       *slog.Logger
 	maxUpload int64
+	metrics   *metrics.Registry
 }
 
 func New(d Deps) http.Handler {
 	s := &Server{
 		users: d.Users, posts: d.Posts, search: d.Search, media: d.Media, ready: d.Ready,
-		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes,
+		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes, metrics: d.Metrics,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -91,6 +95,11 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("PATCH /posts/{id}", s.requireAuth(s.updatePost))
 	mux.HandleFunc("DELETE /posts/{id}", s.requireAuth(s.deletePost))
 
+	if d.Metrics != nil {
+		// In production, expose this on an internal port or restrict it at
+		// the load balancer; it is public here for local development.
+		mux.Handle("GET /metrics", d.Metrics.Handler())
+	}
 	if d.LocalMediaDir != "" {
 		mux.Handle("GET /media/", http.StripPrefix("/media/", http.FileServer(http.Dir(d.LocalMediaDir))))
 	}
@@ -98,7 +107,7 @@ func New(d Deps) http.Handler {
 	// Outermost first: request id → recover → access log → CORS → routes.
 	var h http.Handler = mux
 	h = cors(d.CORSOrigins, h)
-	h = accessLog(s.log, h)
+	h = accessLog(s.log, s.metrics, h)
 	h = recoverer(s.log, h)
 	h = requestID(h)
 	return h

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"networkai/internal/auth"
+	"networkai/internal/metrics"
 )
 
 type ridKey struct{}
@@ -54,8 +55,8 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// accessLog emits one structured log line per request.
-func accessLog(log *slog.Logger, next http.Handler) http.Handler {
+// accessLog emits one structured log line per request and records metrics.
+func accessLog(log *slog.Logger, m *metrics.Registry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
@@ -63,9 +64,15 @@ func accessLog(log *slog.Logger, next http.Handler) http.Handler {
 		if rec.status == 0 {
 			rec.status = http.StatusOK
 		}
+		elapsed := time.Since(start)
+		// ServeMux sets r.Pattern on the request it routed, which is this
+		// same *http.Request, so the route template is available here.
+		if m != nil && r.Pattern != "GET /metrics" {
+			m.ObserveHTTP(r.Pattern, rec.status, elapsed)
+		}
 		log.InfoContext(r.Context(), "request",
 			"method", r.Method, "path", r.URL.Path, "status", rec.status,
-			"bytes", rec.bytes, "duration_ms", float64(time.Since(start).Microseconds())/1000,
+			"bytes", rec.bytes, "route", r.Pattern, "duration_ms", float64(elapsed.Microseconds())/1000,
 			"request_id", requestIDFrom(r.Context()))
 	})
 }
