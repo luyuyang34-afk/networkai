@@ -1,62 +1,77 @@
-# 简历 ↔ 代码对齐表
+# 简历 ↔ 代码对齐表（第二轮）
 
-原则：**简历上的每一句话，都要能在 repo 里指出对应的代码、测试或数据。** 指不出来的就不写，或者换成能指出来的说法。
+原则不变：**简历上的每一句话，都要能在 repo 里指出代码、测试或实测数据。** 下面每条都给出"可以直接用的英文 bullet"，只用了真实测过的数字。
 
-状态：✅ 已实现并有证据　🟡 部分实现　❌ 未实现
+状态：✅ 有证据　🟡 部分　❌ 没有
 
-## Bullet 1 · Social Product & API Integration — ❌
+---
 
-> Built a modular social publishing and discovery interface using Next.js, React, TypeScript, and shadcn/ui…
+## Bullet 1 · Social Product & API Integration — ✅
 
-- 前端还没有开始做。后端 API 已经准备好：CORS 白名单默认放行 `http://localhost:3000`，错误格式统一，`X-Request-ID` 已暴露给前端。
-- 在前端做出来之前，**这一条不能写**。
-
-## Bullet 2 · Search Architecture — ✅（措辞需要微调）
-
-> Maintained canonical post records in PostgreSQL while indexing searchable text and metadata in Elasticsearch; implemented an outbox-driven asynchronous indexing worker with retry and deduplication to reconcile failed updates, and tuned analyzers, filters, and relevance scoring to reduce search P95 latency from [X] ms to [X] ms across [X] indexed posts.
+原稿要求：Next.js、React、TypeScript、shadcn/ui；注册、发帖、feed、编辑；集中式的请求中间件。
 
 | 说法 | 证据 |
 |---|---|
-| PG 保存权威数据 | `internal/db/migrations/0001_init.sql`、ADR 0001 |
-| outbox 驱动的异步索引 worker | `internal/outbox/worker.go` |
-| retry | 指数退避 + 死信 + 依赖宕机时暂停（ADR 0003） |
-| deduplication | 外部版本号让重放无害，同批事件合并（ADR 0002） |
-| tuned analyzers, filters, relevance scoring | 自定义 English analyzer、`message.exact^2`、filter 子句（`search.go`） |
-| **P95 从 X 降到 Y** | ❌ **没有数据。**我们也从没有过一个"慢的版本"可以对比 |
+| Next.js + React + TypeScript | `web/`，App Router |
+| shadcn/ui | 🟡 **按 shadcn 的模式手写的组件**（cva + tailwind-merge + Radix Slot），因为 shadcn 的组件仓库连不上。面试时如实说："shadcn-style primitives"，或者以后在能联网的环境里用 `npx shadcn add` 替换 |
+| 注册、发帖、Feed、编辑 | 全部完成，另外还有删除、点赞、搜索、For you |
+| 集中式请求中间件 | `web/src/lib/api.ts`：统一附加 JWT、解析错误、401 时自动登出 |
+| 测试 | Playwright 8 个流程，CI 中跑 |
 
-建议改写成下面这样（每个词都有出处）：
+建议的写法：
+> **Social Product & API Integration:** Built a **Next.js/React/TypeScript** client with **TanStack Query** (cursor-based infinite scroll, optimistic likes and deletes, targeted cache updates) over **Go REST APIs**, with one typed request layer for JWT auth, error mapping and session expiry; covered 8 user flows with **Playwright** end-to-end tests in CI.
 
-> **Search Architecture:** Kept canonical post records in **PostgreSQL** and synced a derived **Elasticsearch** index through a **transactional outbox** and asynchronous indexing worker. Made indexing idempotent and order-independent with **external versioning** and tombstones, so retries, duplicates and out-of-order deliveries converge. Verified with failure-injection tests that a **150-second search outage lost zero writes**, and tuned analyzers (stemming, ASCII folding), filters and field boosts for relevance.
+## Bullet 2 · Search Architecture — ✅
 
-"150 秒零丢失"是实测数字，有 engineering log 记录，可以写。如果之后要写 P95，需要先做 k6 压测，并且写清楚测试方法。
+> **Search Architecture:** Kept canonical posts in **PostgreSQL** and synced **Elasticsearch** through a **transactional outbox** and async indexer with external versioning, so retries and out-of-order events converge. Failure-injection tests verified a **150-second search outage lost zero writes**. Cut full reindex time **28× (134 s → 4.7 s)** with batched reads and the `_bulk` API, and added zero-downtime **blue/green index rebuilds** with atomic alias swaps.
 
-## Bullet 3 · Personalized Feed Ranking — ❌
+原稿写的是"把 search P95 从 X ms 降到 Y ms"。我们没有一个"慢的搜索版本"可以拿来对比，所以不写这个。可以改用真实测得的数字：混合负载下搜索 P95 为 67ms（1000 req/s）。
 
-> Built a two-stage recommendation pipeline… improved offline nDCG@10 by [X]% over [X] held-out user interactions.
+## Bullet 3 · Personalized Feed Ranking — ✅（数据是合成的，必须说清楚）
 
-- 现在只有按时间倒序的 feed（`GET /posts`），这正好可以作为 baseline。
-- 前提是要有**交互数据**：点赞、浏览等表还没有建。需要找一个公开数据集，或者老老实实地生成模拟数据，并在 README 里写明数据来源。
-- 这是工作量最大、风险最高的一条，排在压测之后做。
+> **Personalized Feed Ranking:** Built a two-stage recommender: **kNN retrieval** over post embeddings in Elasticsearch, then a logistic-regression ranker on freshness, engagement, semantic similarity and author affinity, with an author-diversity pass. Improved offline **nDCG@10 by 14%** over a chronological baseline on **300K held-out impressions** (time-split evaluation with feature ablations).
 
-## Bullet 4 · Backend Reliability & Security — 🟡
+⚠️ 面试时必须主动说明，这是诚信底线：
+- 数据是**合成的**（真实数据集在开发环境里下载不了）；
+- 生成器的结构和模型特征是一致的，所以 14% 代表"流程正确、模型能学到信号"，**不能当成真实用户上的提升**；
+- embedding 用的是 LSA（TF-IDF + SVD），不是神经网络模型。
 
-> Implemented Go API endpoints with JWT verification, ownership-based authorization checks, pagination, and consistent structured error responses; added load tests and failure-path integration tests to sustain [X] RPS with P95 API latency below [X] ms.
+如果想让这条更硬：放行一个真实数据集（见 [bottlenecks.md](bottlenecks.md) 第 1 条），重新跑 `make train`，就能得到真实数据上的数字。
+
+## Bullet 4 · Backend Reliability & Security — ✅
+
+> **Backend Reliability & Security:** Built **Go** APIs with pinned-algorithm **JWT** auth, row-locked ownership checks, keyset pagination and a uniform error contract. Load-tested with **k6** at **~1,200 req/s** with zero errors on core endpoints, and fixed a feed-induced Elasticsearch thread-pool collapse (search P50 **4.4 s → 20 ms**) using payload slimming, query pruning, segment merging and a **bulkhead**.
+
+数字的出处：[benchmark.md](benchmark.md)。必须能说清楚的前提：
+- 单台 4 vCPU 机器；
+- 压测工具 k6 和被测服务在同一台机器上。
+
+## Bullet 5 · Generative AI Assistance — 🟡
 
 | 说法 | 状态 |
 |---|---|
-| JWT verification | ✅ 固定算法、强制 exp 和 issuer，`TestTokenRejections` 覆盖 |
-| ownership authorization | ✅ 带行锁的检查，403/404 区分清楚 |
-| pagination | ✅ keyset（PG）+ search_after（ES） |
-| consistent structured errors | ✅ 统一的 `{error:{code,message},request_id}` |
-| failure-path integration tests | ✅ ES 宕机、事务回滚、上传失败补偿、并发 worker |
-| **load tests, X RPS, P95 < X ms** | ❌ 还没有压测 |
+| 接入 OpenAI API、prompt 模板、超时、token 计量、优雅降级 | ✅ 代码和测试都有（`internal/assist`，ADR 0004） |
+| `[X]% successful completions`、`$[X] average cost` | ❌ **开发环境连不上 OpenAI，也没有 key，没有真实数据** |
 
-在压测做完之前，去掉 RPS 和 P95 的部分，可以把"race detector"、"mutation-checked"这类真实做过的事写进去。
+在拿到真实数据之前，可以先这样写（不带数字）：
+> **Generative AI Assistance:** Integrated an **OpenAI-compatible LLM** into the post editor behind timeouts, a single retry for 429/5xx, per-user rate limits, input/output caps, prompt-injection delimiting and graceful fallback; instrumented **token usage, latency and cost per request** in Prometheus.
 
-## Bullet 5 · Generative AI Assistance — ❌
+配置好 key 之后用 k6 或手动跑几百次，就能从 `/metrics` 拿到成功率和平均成本，再把数字补回去。
 
-- 还没有实现。之前讨论过可以把这一条换成 feed fan-out 或 Redis，以避免和 AI Document Q&A 项目重复。这个决定还没定。
+---
 
-## 技能栏
+## 去重：三个项目之间
 
-简历里出现的 Elasticsearch、PostgreSQL、Docker、Go、JWT，现在都有对应代码。GCS 有代码，但本地默认用的是磁盘存储，没有真正部署过，被问到时要如实说。
+之前讨论过 NetworkAI 的 GenAI 这条和 Doc Q&A 项目有重叠。现在 NetworkAI 的分量来自 Bullet 2、3、4。**如果简历版面紧张，建议删掉 Bullet 5**，或者压缩成半行。
+
+## 技能栏核对
+
+| 技能 | 本项目是否用到 |
+|---|---|
+| Go, SQL, TypeScript | ✅ |
+| Next.js, TanStack Query, Tailwind | ✅ |
+| shadcn/ui | 🟡 手写的同类组件 |
+| PostgreSQL, Elasticsearch, Docker | ✅ |
+| Python | ✅（训练和评估脚本，只用了 numpy 和 pandas） |
+| Prometheus, k6 | ✅ 可以考虑加进技能栏 |
+| Kotlin, Jetpack Compose, LangChain | ❌ 三个项目都没有用到，建议从技能栏删掉 |
