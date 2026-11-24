@@ -4,15 +4,9 @@ go 1.27.3
 
 require (
 	cloud.google.com/go/storage v1.71.0
-	github.com/auth0/go-jwt-middleware v1.0.1
-	github.com/form3tech-oss/jwt-go v3.2.5+incompatible
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/handlers v1.5.2
-	github.com/gorilla/mux v1.8.1
 	github.com/jackc/pgx/v5 v5.13.0
-	github.com/olivere/elastic/v7 v7.0.32
-	github.com/pborman/uuid v1.2.1
 	golang.org/x/crypto v0.59.0
 )
 
@@ -40,9 +34,6 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
-	github.com/josharian/intern v1.0.0 // indirect
-	github.com/mailru/easyjson v0.7.7 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
