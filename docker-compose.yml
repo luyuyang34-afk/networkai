@@ -1,0 +1,65 @@
+# One command to run everything locally:  docker compose up --build
+#
+# api      -> http://localhost:8080
+# indexer  -> outbox worker (PostgreSQL -> Elasticsearch)
+#
+# The secrets below are for local development only.
+x-app-env: &app-env
+  DATABASE_URL: postgres://networkai:networkai@postgres:5432/networkai?sslmode=disable
+  ES_URL: http://elasticsearch:9200
+  JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-do-not-use-in-prod}
+  MEDIA_BACKEND: local
+  MEDIA_BASE_URL: http://localhost:8080/media
+  CORS_ORIGINS: http://localhost:3000
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: networkai
+      POSTGRES_PASSWORD: networkai
+      POSTGRES_DB: networkai
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 2s
+      retries: 30
+
+  elasticsearch:
+    image: elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs localhost:9200/_cluster/health >/dev/null"]
+      interval: 3s
+      retries: 60
+
+  api:
+    build: .
+    command: ["api"]
+    environment: *app-env
+    ports: ["8080:8080"]
+    volumes: [media:/data/media]
+    # Deliberately NOT depending on elasticsearch: the API must keep
+    # accepting writes while search is down (see docs/adr/0001).
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  indexer:
+    build: .
+    command: ["indexer"]
+    environment: *app-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      api: {condition: service_started} # api applies migrations on start
+
+volumes:
+  pgdata:
+  esdata:
+  media:
