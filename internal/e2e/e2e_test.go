@@ -378,3 +378,37 @@ func mustLocal(t *testing.T) media.Store {
 	}
 	return m
 }
+
+func TestPurgeTombstonesRemovesOnlyOldDeletedDocs(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	docs := []struct {
+		id      string
+		deleted bool
+		updated time.Time
+	}{
+		{"old-tombstone", true, old},
+		{"new-tombstone", true, time.Now()},
+		{"old-live", false, old},
+	}
+	for _, d := range docs {
+		if _, err := e.es.Upsert(ctx, search.Doc{ID: d.id, Author: "a", Message: "purge test", MediaType: "none",
+			CreatedAt: d.updated, UpdatedAt: d.updated, Deleted: d.deleted}, 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.es.Refresh(ctx) //nolint:errcheck
+	n, err := e.es.PurgeTombstones(ctx, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("purged %d, want 1 (only the old tombstone)", n)
+	}
+	// The purged post can't come back: a late event re-reads PostgreSQL
+	// (which says deleted) and writes a new tombstone, still filtered out.
+	if res, _ := e.es.Search(ctx, search.Query{Text: "purge", Limit: 10}); len(res.Docs) != 1 || res.Docs[0].ID != "old-live" {
+		t.Fatalf("after purge, search = %+v", res.Docs)
+	}
+}

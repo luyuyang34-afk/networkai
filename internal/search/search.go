@@ -189,6 +189,34 @@ func (c *Client) Refresh(ctx context.Context) error {
 	return expect(resp, http.StatusOK)
 }
 
+// PurgeTombstones permanently removes deleted-post tombstones last updated
+// before olderThan ago, returning how many were removed.
+//
+// This is safe because the indexer always re-reads PostgreSQL: if a very late
+// event for a purged post is ever processed, PostgreSQL still says "deleted"
+// and the indexer just writes a fresh tombstone. The post cannot come back.
+func (c *Client) PurgeTombstones(ctx context.Context, olderThan time.Duration) (int64, error) {
+	body := fmt.Sprintf(`{"query":{"bool":{"filter":[
+		{"term":{"deleted":true}},
+		{"range":{"updated_at":{"lt":"now-%ds"}}}]}}}`, int64(olderThan.Seconds()))
+	resp, err := c.do(ctx, http.MethodPost, "/"+c.alias+"/_delete_by_query?conflicts=proceed&refresh=true",
+		strings.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("purge tombstones: status %d: %s", resp.StatusCode, readBody(resp))
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Deleted int64 `json:"deleted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	return out.Deleted, nil
+}
+
 type Query struct {
 	Text      string // full-text query on message; empty = newest first
 	Author    string // exact username filter
