@@ -355,6 +355,23 @@ func TestUploadSniffsContent(t *testing.T) {
 	}
 }
 
+func TestCreateTextPostWithJSON(t *testing.T) {
+	h := newHarness(t, nil)
+	alice := h.tokenFor("alice")
+	if w := h.jsonReq("POST", "/posts", alice, map[string]string{"message": "  hello json  "}); w.Code != 201 ||
+		!strings.Contains(w.Body.String(), `"message":"hello json"`) {
+		t.Fatalf("json post: %d %s", w.Code, w.Body)
+	}
+	for _, body := range []any{map[string]string{"message": "   "}, map[string]any{"message": "x", "extra": 1}} {
+		if w := h.jsonReq("POST", "/posts", alice, body); w.Code != 400 {
+			t.Errorf("body %v: %d, want 400", body, w.Code)
+		}
+	}
+	if w := h.req("POST", "/posts", alice, strings.NewReader("message=x"), "application/x-www-form-urlencoded"); w.Code != 400 {
+		t.Errorf("urlencoded: %d, want 400", w.Code)
+	}
+}
+
 // If the database write fails after the file was uploaded, the file must be
 // removed (compensating action) so storage does not fill with orphans.
 func TestUploadIsCleanedUpWhenDBWriteFails(t *testing.T) {

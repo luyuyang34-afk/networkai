@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -79,14 +80,18 @@ var mediaExts = map[string]bool{
 	".mp4": true, ".mov": true, ".webm": true, ".avi": true,
 }
 
-// createPost accepts multipart/form-data with `message` and an optional
-// `media_file`.
+// createPost accepts either JSON {"message": "..."} for a text-only post, or
+// multipart/form-data with `message` and an optional `media_file`.
 //
 // Ordering matters: the file is uploaded first and the database row second.
 // If the database write fails we delete the file (a compensating action). The
 // reverse order could leave a post pointing at a file that never arrived.
 func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt == "application/json" {
+		s.createTextPost(w, r, p)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxUpload+1<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		var tooBig *http.MaxBytesError
@@ -146,6 +151,30 @@ func (s *Server) createPost(w http.ResponseWriter, r *http.Request) {
 		if np.MediaKey != "" {
 			s.cleanupMedia(r.Context(), np.MediaKey)
 		}
+		internalError(w, r, s.log, err)
+		return
+	}
+	w.Header().Set("Location", "/posts/"+post.ID.String())
+	writeJSON(w, http.StatusCreated, toResponse(post))
+}
+
+func (s *Server) createTextPost(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	var body struct {
+		Message string `json:"message"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_json", `body must be {"message": "..."}`)
+		return
+	}
+	msg := strings.TrimSpace(body.Message)
+	if msg == "" || !validMessage(msg) {
+		writeError(w, r, http.StatusBadRequest, "invalid_input", "message must be 1-5000 characters of valid UTF-8")
+		return
+	}
+	post, err := s.posts.CreatePost(r.Context(), store.NewPost{ID: uuid.New(), AuthorID: p.UserID, Message: msg, MediaType: "none"})
+	if err != nil {
 		internalError(w, r, s.log, err)
 		return
 	}
