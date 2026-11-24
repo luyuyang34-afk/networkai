@@ -38,6 +38,10 @@ type Config struct {
 
 	CORSOrigins []string
 
+	// ModelDir holds lsa.json and ranker.json. If they are missing, posts are
+	// indexed without embeddings and GET /feed returns 503.
+	ModelDir string
+
 	IndexerBatchSize   int
 	IndexerPoll        time.Duration
 	IndexerMaxAttempts int
@@ -57,6 +61,7 @@ func Load() (Config, error) {
 		MediaBaseURL:       env("MEDIA_BASE_URL", "http://localhost:8080/media"),
 		GCSBucket:          os.Getenv("GCS_BUCKET"),
 		CORSOrigins:        splitList(env("CORS_ORIGINS", "http://localhost:3000")),
+		ModelDir:           env("MODEL_DIR", "./models"),
 		IndexerBatchSize:   100,
 		IndexerMaxAttempts: 10,
 	}

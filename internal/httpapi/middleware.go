@@ -115,6 +115,20 @@ func cors(origins []string, next http.Handler) http.Handler {
 	})
 }
 
+// optionalAuth attaches the principal when a valid token is present and
+// otherwise serves the request anonymously (used to personalise read
+// responses, e.g. "liked by me").
+func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if tok, ok := auth.BearerToken(r); ok {
+			if p, err := s.tokens.Parse(tok); err == nil {
+				r = r.WithContext(auth.WithPrincipal(r.Context(), p))
+			}
+		}
+		next(w, r)
+	}
+}
+
 // requireAuth rejects requests without a valid bearer token and puts the
 // authenticated principal into the request context.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {

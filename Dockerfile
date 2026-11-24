@@ -13,7 +13,9 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 RUN adduser -D -u 10001 app && mkdir -p /data/media && chown app /data/media
 USER app
 COPY --from=build /out/networkai /usr/local/bin/networkai
-ENV MEDIA_DIR=/data/media
+# Trained offline by tools/ranking/train_eval.py (embeddings + ranker).
+COPY models /models
+ENV MEDIA_DIR=/data/media MODEL_DIR=/models
 EXPOSE 8080
 ENTRYPOINT ["networkai"]
 CMD ["api"]

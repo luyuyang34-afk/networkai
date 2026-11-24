@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"networkai/internal/auth"
+	"networkai/internal/feed"
 	"networkai/internal/media"
 	"networkai/internal/metrics"
 	"networkai/internal/outbox"
@@ -29,6 +30,18 @@ type PostStore interface {
 	DeletePost(ctx context.Context, id uuid.UUID, authorID int64) (store.Post, error)
 	GetPost(ctx context.Context, id uuid.UUID) (store.Post, error)
 	ListPosts(ctx context.Context, lp store.ListParams) ([]store.Post, *store.PageCursor, error)
+}
+
+// Likes is optional; without it posts report zero likes.
+type Likes interface {
+	Like(ctx context.Context, userID int64, postID uuid.UUID) error
+	Unlike(ctx context.Context, userID int64, postID uuid.UUID) error
+	LikeInfo(ctx context.Context, postIDs []string, userID int64) (map[string]int, map[string]bool, error)
+}
+
+// Feed is the personalised feed; optional (requires trained models).
+type Feed interface {
+	ForYou(ctx context.Context, userID int64, username string, limit int) ([]feed.Item, error)
 }
 
 type Searcher interface {
@@ -55,6 +68,8 @@ type Deps struct {
 	LocalMediaDir string
 	// Metrics, if set, records request metrics and is served at /metrics.
 	Metrics *metrics.Registry
+	Likes   Likes
+	Feed    Feed
 }
 
 type Server struct {
@@ -67,12 +82,15 @@ type Server struct {
 	log       *slog.Logger
 	maxUpload int64
 	metrics   *metrics.Registry
+	likes     Likes
+	feed      Feed
 }
 
 func New(d Deps) http.Handler {
 	s := &Server{
 		users: d.Users, posts: d.Posts, search: d.Search, media: d.Media, ready: d.Ready,
 		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes, metrics: d.Metrics,
+		likes: d.Likes, feed: d.Feed,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -88,9 +106,12 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /users", s.signup)
 	mux.HandleFunc("POST /auth/login", s.login)
 
-	mux.HandleFunc("GET /posts", s.listPosts)
-	mux.HandleFunc("GET /posts/search", s.searchPosts)
-	mux.HandleFunc("GET /posts/{id}", s.getPost)
+	mux.HandleFunc("GET /posts", s.optionalAuth(s.listPosts))
+	mux.HandleFunc("GET /posts/search", s.optionalAuth(s.searchPosts))
+	mux.HandleFunc("GET /posts/{id}", s.optionalAuth(s.getPost))
+	mux.HandleFunc("POST /posts/{id}/like", s.requireAuth(s.likePost))
+	mux.HandleFunc("DELETE /posts/{id}/like", s.requireAuth(s.unlikePost))
+	mux.HandleFunc("GET /feed", s.requireAuth(s.forYou))
 	mux.HandleFunc("POST /posts", s.requireAuth(s.createPost))
 	mux.HandleFunc("PATCH /posts/{id}", s.requireAuth(s.updatePost))
 	mux.HandleFunc("DELETE /posts/{id}", s.requireAuth(s.deletePost))

@@ -3,7 +3,8 @@
 //	networkai api       HTTP API (applies migrations on start)
 //	networkai indexer   outbox worker: PostgreSQL -> Elasticsearch
 //	networkai migrate   apply database migrations and exit
-//	networkai reindex   rebuild the search index from PostgreSQL and exit
+//	networkai reindex [-fresh]  re-apply all posts to the index (in place,
+//	                            or blue/green into a new index + alias swap)
 //	networkai sweep-media [-dry-run]  delete media files no live post references
 package main
 
@@ -16,12 +17,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"networkai/internal/auth"
 	"networkai/internal/config"
 	"networkai/internal/db"
+	"networkai/internal/embed"
+	"networkai/internal/feed"
 	"networkai/internal/httpapi"
 	"networkai/internal/indexer"
 	"networkai/internal/maintenance"
@@ -83,10 +87,21 @@ func run(ctx context.Context, cmd string, log *slog.Logger) error {
 	case "indexer":
 		return runIndexer(ctx, cfg, st, pool, es, log)
 	case "reindex":
+		fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+		fresh := fs.Bool("fresh", false, "blue/green: build a new index, swap the alias, delete the old one")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
 		if err := es.EnsureIndex(ctx); err != nil {
 			return err
 		}
-		ix := &indexer.Indexer{Posts: st, Index: es, Log: log}
+		ix := &indexer.Indexer{Posts: st, Index: es, Log: log, Embed: loadEmbedder(cfg, log)}
+		if *fresh {
+			name := fmt.Sprintf("%s_%s", search.DefaultAlias, time.Now().UTC().Format("20060102t150405"))
+			loaded, caught, err := ix.RebuildFresh(ctx, es, name)
+			log.Info("fresh rebuild finished", "index", name, "posts", loaded, "caught_up", caught)
+			return err
+		}
 		n, err := ix.Reindex(ctx)
 		log.Info("reindex finished", "posts", n)
 		return err
@@ -140,6 +155,8 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		MaxUploadBytes: cfg.MaxUploadBytes,
 		LocalMediaDir:  localDir,
 		Metrics:        apiMetrics(pool),
+		Likes:          st,
+		Feed:           loadFeed(cfg, st, es, log),
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -193,7 +210,7 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 	go serveMetrics(ctx, cfg.MetricsAddr, m, log)
 	go purgeTombstonesPeriodically(ctx, es, log)
 
-	ix := &indexer.Indexer{Posts: st, Index: es, Log: log}
+	ix := &indexer.Indexer{Posts: st, Index: es, Log: log, Embed: loadEmbedder(cfg, log)}
 	w := &outbox.Worker{
 		OnEvent:      m.ObserveOutboxEvent,
 		OnPause:      m.SetOutboxPaused,
@@ -208,6 +225,24 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 		},
 	}
 	return w.Run(ctx)
+}
+
+func loadEmbedder(cfg config.Config, log *slog.Logger) func(string) []float32 {
+	m, err := embed.Load(filepath.Join(cfg.ModelDir, "lsa.json"))
+	if err != nil {
+		log.Warn("no embedding model; indexing without embeddings", "err", err)
+		return nil
+	}
+	return m.Embed
+}
+
+func loadFeed(cfg config.Config, st *store.Store, es *search.Client, log *slog.Logger) httpapi.Feed {
+	r, err := feed.LoadRanker(filepath.Join(cfg.ModelDir, "ranker.json"))
+	if err != nil {
+		log.Warn("no ranker model; GET /feed disabled", "err", err)
+		return nil
+	}
+	return &feed.Service{Signals: st, Index: es, Ranker: r}
 }
 
 func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {

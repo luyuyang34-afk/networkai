@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"networkai/internal/auth"
+	"networkai/internal/embed"
+	"networkai/internal/feed"
 	"networkai/internal/httpapi"
 	"networkai/internal/indexer"
 	"networkai/internal/media"
@@ -78,15 +80,24 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lsa, err := embed.Load("../../models/lsa.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranker, err := feed.LoadRanker("../../models/ranker.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	api := httptest.NewServer(httpapi.New(httpapi.Deps{
-		Users: st, Posts: st, Search: es, Media: ms,
+		Users: st, Posts: st, Search: es, Media: ms, Likes: st,
+		Feed:   &feed.Service{Signals: st, Index: es, Ranker: ranker},
 		Ready:  readiness{Store: st, pool: pool},
 		Tokens: auth.NewTokens([]byte(strings.Repeat("k", 32)), time.Hour),
 		Log:    quiet,
 	}))
 	t.Cleanup(api.Close)
 
-	ix := &indexer.Indexer{Posts: st, Index: es}
+	ix := &indexer.Indexer{Posts: st, Index: es, Embed: lsa.Embed}
 	w := &outbox.Worker{Pool: pool, Handle: ix.Handle, Log: quiet,
 		Backoff: func(int) time.Duration { return 0 }, MaxAttempts: 3,
 		IsUnavailable: func(err error) bool { return errors.Is(err, search.ErrUnavailable) }}
@@ -468,4 +479,155 @@ func TestBulkReindexMatchesPostgres(t *testing.T) {
 	if len(res.Docs) != 1 || res.Docs[0].ID != edited {
 		t.Fatalf("reindex overwrote a newer version: %+v", res.Docs)
 	}
+}
+
+func TestLikesAreIdempotentAndCounted(t *testing.T) {
+	e := setup(t)
+	alice, bob := e.login("alice"), e.login("bob")
+	id := e.createPost(alice, "a post worth liking")
+
+	for i := 0; i < 2; i++ { // liking twice is a no-op
+		if code, _ := e.do("POST", "/posts/"+id+"/like", bob, nil, ""); code != http.StatusNoContent {
+			t.Fatalf("like: %d", code)
+		}
+	}
+	_, body := e.do("GET", "/posts/"+id, bob, nil, "")
+	if body["like_count"].(float64) != 1 || body["liked"] != true {
+		t.Fatalf("as bob: %v", body)
+	}
+	_, body = e.do("GET", "/posts/"+id, "", nil, "")
+	if body["like_count"].(float64) != 1 || body["liked"] != false {
+		t.Fatalf("anonymous: %v", body)
+	}
+	if code, _ := e.do("DELETE", "/posts/"+id+"/like", bob, nil, ""); code != http.StatusNoContent {
+		t.Fatalf("unlike: %d", code)
+	}
+	if _, body = e.do("GET", "/posts/"+id, bob, nil, ""); body["like_count"].(float64) != 0 {
+		t.Fatalf("after unlike: %v", body)
+	}
+	if code, _ := e.do("POST", "/posts/"+uuidString()+"/like", bob, nil, ""); code != http.StatusNotFound {
+		t.Fatalf("like missing post: %d", code)
+	}
+}
+
+// End to end: after liking coffee posts, a user's For-you feed should put
+// unseen coffee posts above unrelated ones, and never show their own or
+// already-liked posts.
+func TestForYouFeedReflectsLikes(t *testing.T) {
+	e := setup(t)
+	alice, bob, carol := e.login("alice"), e.login("bob"), e.login("carol")
+
+	var liked []string
+	for _, m := range []string{"espresso roast with crema at the cafe", "latte art and arabica beans",
+		"pourover coffee brew with a new grinder"} {
+		liked = append(liked, e.createPost(bob, m))
+	}
+	unseenCoffee := e.createPost(carol, "barista notes: espresso, cappuccino and a fresh roast")
+	for _, m := range []string{"summit hike on the forest trail", "deadlift and squat workout at the gym",
+		"new indie game boss fight speedrun"} {
+		e.createPost(carol, m)
+	}
+	e.createPost(alice, "my own espresso post") // alice must not see her own posts
+	e.drain()
+
+	for _, id := range liked {
+		if code, _ := e.do("POST", "/posts/"+id+"/like", alice, nil, ""); code != http.StatusNoContent {
+			t.Fatalf("like: %d", code)
+		}
+	}
+	code, body := e.do("GET", "/feed?limit=10", alice, nil, "")
+	if code != 200 {
+		t.Fatalf("feed: %d %v", code, body)
+	}
+	items := body["items"].([]any)
+	if len(items) == 0 {
+		t.Fatal("empty feed")
+	}
+	first := items[0].(map[string]any)
+	if first["id"] != unseenCoffee {
+		t.Fatalf("first item = %v (%v), want the unseen coffee post", first["message"], first["ranking"])
+	}
+	for _, it := range items {
+		m := it.(map[string]any)
+		if m["author"] == "alice" {
+			t.Fatal("own post in feed")
+		}
+		for _, id := range liked {
+			if m["id"] == id {
+				t.Fatal("already-liked post in feed")
+			}
+		}
+	}
+	srcs := first["ranking"].(map[string]any)["sources"].([]any)
+	if len(srcs) < 2 {
+		t.Fatalf("expected the coffee post to be retrieved by several sources, got %v", srcs)
+	}
+}
+
+func uuidString() string { return "6f1c8b7e-0000-4000-8000-000000000000" }
+
+// swapHook simulates the live worker writing to the OLD index between the
+// bulk load and the alias swap, the window a blue/green rebuild must cover.
+type swapHook struct {
+	*search.Client
+	beforeSwap func()
+}
+
+func (h swapHook) SwapAlias(ctx context.Context, idx string) ([]string, error) {
+	h.beforeSwap()
+	return h.Client.SwapAlias(ctx, idx)
+}
+
+func TestRebuildFreshSwapsAliasAndCatchesUp(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	alice := e.login("alice")
+	keep := e.createPost(alice, "espresso before the rebuild")
+	edited := e.createPost(alice, "this text will change during the rebuild")
+	e.drain()
+
+	// Simulate an index built before embeddings existed.
+	noEmbed := &indexer.Indexer{Posts: e.ix.Posts, Index: e.es}
+	if _, err := noEmbed.Reindex(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	hook := swapHook{Client: e.es, beforeSwap: func() {
+		// A user edits a post mid-rebuild; the worker writes it to the old index.
+		if code, _ := e.jsonReq("PATCH", "/posts/"+edited, alice, map[string]string{"message": "changed mid rebuild"}); code != 200 {
+			t.Fatalf("edit: %d", code)
+		}
+		e.drain()
+	}}
+	newIdx := fmt.Sprintf("%s_fresh", e.es.Alias())
+	loaded, caught, err := e.ix.RebuildFresh(ctx, hook, newIdx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != 2 || caught < 1 {
+		t.Fatalf("loaded=%d caught_up=%d", loaded, caught)
+	}
+	e.es.Refresh(ctx) //nolint:errcheck
+
+	embs, err := e.es.Embeddings(ctx, []string{keep})
+	if err != nil || len(embs[keep]) != search.EmbeddingDims {
+		t.Fatalf("documents in the new index should carry embeddings: %v %v", embs, err)
+	}
+	if hits := e.searchIDs("mid+rebuild"); len(hits) != 1 || hits[0] != edited {
+		t.Fatalf("edit made during the rebuild was lost: %v", hits)
+	}
+	resp, err := http.Get(testutil.ESURL(t) + "/" + e.es.Alias() + "_v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("old index should be deleted, got %d", resp.StatusCode)
+	}
+	t.Cleanup(func() {
+		req, _ := http.NewRequest(http.MethodDelete, testutil.ESURL(t)+"/"+newIdx, nil)
+		if r, err := http.DefaultClient.Do(req); err == nil {
+			r.Body.Close()
+		}
+	})
 }

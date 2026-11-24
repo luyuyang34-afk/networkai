@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"networkai/internal/auth"
+	"networkai/internal/feed"
 	"networkai/internal/media"
 	"networkai/internal/search"
 	"networkai/internal/store"
@@ -37,6 +38,8 @@ type postResponse struct {
 	MediaURL  string    `json:"media_url,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	LikeCount int       `json:"like_count"`
+	Liked     bool      `json:"liked"`
 }
 
 type pageResponse struct {
@@ -215,7 +218,12 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, s.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toResponse(p))
+	items := []postResponse{toResponse(p)}
+	if err := s.attachLikes(r, items); err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items[0])
 }
 
 func (s *Server) updatePost(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +311,10 @@ func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
 	for i, p := range posts {
 		resp.Items[i] = toResponse(p)
 	}
+	if err := s.attachLikes(r, resp.Items); err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
 	if next != nil {
 		resp.NextCursor = encodePageCursor(*next)
 	}
@@ -342,6 +354,10 @@ func (s *Server) searchPosts(w http.ResponseWriter, r *http.Request) {
 	for i, d := range res.Docs {
 		resp.Items[i] = docToResponse(d)
 	}
+	if err := s.attachLikes(r, resp.Items); err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -357,6 +373,103 @@ func (s *Server) observeSearch(err error) {
 	default:
 		s.metrics.ObserveSearch("error")
 	}
+}
+
+// attachLikes fills like_count/liked for a page in one batched query.
+func (s *Server) attachLikes(r *http.Request, items []postResponse) error {
+	if s.likes == nil || len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	p, _ := auth.FromContext(r.Context())
+	counts, mine, err := s.likes.LikeInfo(r.Context(), ids, p.UserID)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].LikeCount = counts[items[i].ID]
+		items[i].Liked = mine[items[i].ID]
+	}
+	return nil
+}
+
+func (s *Server) likePost(w http.ResponseWriter, r *http.Request) { s.setLike(w, r, true) }
+
+func (s *Server) unlikePost(w http.ResponseWriter, r *http.Request) { s.setLike(w, r, false) }
+
+// setLike is idempotent in both directions, so client retries are safe.
+func (s *Server) setLike(w http.ResponseWriter, r *http.Request, like bool) {
+	if s.likes == nil {
+		writeError(w, r, http.StatusNotImplemented, "not_implemented", "likes are not enabled")
+		return
+	}
+	id, ok := s.postID(w, r)
+	if !ok {
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	var err error
+	if like {
+		err = s.likes.Like(r.Context(), p.UserID, id)
+	} else {
+		err = s.likes.Unlike(r.Context(), p.UserID, id)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "post not found")
+		return
+	}
+	if err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// forYou is the personalised feed. If ranking is unavailable (no models, or
+// Elasticsearch down) clients should fall back to the chronological GET /posts.
+func (s *Server) forYou(w http.ResponseWriter, r *http.Request) {
+	if s.feed == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "feed_unavailable", "personalised feed is not enabled")
+		return
+	}
+	limit, ok := parseLimit(r)
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, "invalid_input", "limit must be 1-100")
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	items, err := s.feed.ForYou(r.Context(), p.UserID, p.Username, limit)
+	if errors.Is(err, search.ErrUnavailable) {
+		writeError(w, r, http.StatusServiceUnavailable, "feed_unavailable",
+			"personalised feed is temporarily unavailable; the latest feed still works")
+		return
+	}
+	if err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
+	type rankedPost struct {
+		postResponse
+		Ranking feed.Item `json:"ranking"`
+	}
+	out := struct {
+		Items []rankedPost `json:"items"`
+	}{Items: make([]rankedPost, len(items))}
+	resp := make([]postResponse, len(items))
+	for i, it := range items {
+		resp[i] = docToResponse(it.Doc)
+	}
+	if err := s.attachLikes(r, resp); err != nil {
+		internalError(w, r, s.log, err)
+		return
+	}
+	for i := range items {
+		out.Items[i] = rankedPost{postResponse: resp[i], Ranking: items[i]}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func encodePageCursor(c store.PageCursor) string {
