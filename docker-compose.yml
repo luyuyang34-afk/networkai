@@ -59,6 +59,15 @@ services:
       postgres: {condition: service_healthy}
       api: {condition: service_started} # api applies migrations on start
 
+  # Optional: docker compose --profile observability up -d
+  # Prometheus UI at http://localhost:9090 (Alerts tab shows rule state).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    ports: ["9090:9090"]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+
 volumes:
   pgdata:
   esdata:

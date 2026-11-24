@@ -1,0 +1,42 @@
+# Alert rules. Each alert answers "what is the user-visible impact?".
+groups:
+  - name: networkai
+    rules:
+      # Search is falling behind the database. Fires during an Elasticsearch
+      # outage, a stalled or crashed indexer, or a write spike the indexer
+      # cannot keep up with. Posting and browsing still work while this fires.
+      - alert: SearchIndexLagging
+        expr: max(networkai_outbox_oldest_pending_seconds) > 120
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "Search is {{ $value | humanizeDuration }} behind PostgreSQL"
+          runbook: "Check networkai_outbox_paused and Elasticsearch health; see docs/runbook.md"
+
+      # Events that exhausted their retries need a human: they will never be
+      # indexed on their own. `networkai reindex` repairs the index.
+      - alert: OutboxDeadLetters
+        expr: max(networkai_outbox_dead) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $value }} outbox events dead-lettered"
+
+      # Error budget burn on the API (5xx ratio over 5 minutes).
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(networkai_http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(networkai_http_requests_total[5m])) > 0.02
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "API 5xx ratio above 2%"
+
+      - alert: APIHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(networkai_http_request_duration_seconds_bucket{route!="POST /posts"}[5m]))) > 0.25
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "P95 latency (excluding uploads) above 250 ms"
