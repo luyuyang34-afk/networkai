@@ -262,6 +262,131 @@ func (s *Store) PostsForIndexAfter(ctx context.Context, after uuid.UUID, limit i
 	return out, rows.Err()
 }
 
+// PostIDsUpdatedSince returns ids of posts (including deleted) changed at or
+// after since. Used by the catch-up phase of a blue/green rebuild.
+func (s *Store) PostIDsUpdatedSince(ctx context.Context, since time.Time) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM posts WHERE updated_at >= $1`, since)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}
+
+// Now returns the database clock, so time windows compare against the same
+// clock that stamps updated_at.
+func (s *Store) Now(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&t)
+	return t, err
+}
+
+// ---------- likes ----------
+
+// Like records that userID likes a live post. Liking twice is a no-op.
+func (s *Store) Like(ctx context.Context, userID int64, postID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO likes (user_id, post_id)
+		SELECT $1, id FROM posts WHERE id = $2 AND deleted_at IS NULL
+		ON CONFLICT DO NOTHING`, userID, postID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Either already liked (fine) or the post does not exist.
+		var exists bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM posts WHERE id = $1 AND deleted_at IS NULL)`, postID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (s *Store) Unlike(ctx context.Context, userID int64, postID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+	return err
+}
+
+// LikeInfo returns like counts for postIDs and which of them userID liked
+// (userID 0 = anonymous).
+func (s *Store) LikeInfo(ctx context.Context, postIDs []string, userID int64) (map[string]int, map[string]bool, error) {
+	counts, err := s.LikeCounts(ctx, postIDs)
+	if err != nil || userID == 0 {
+		return counts, map[string]bool{}, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT post_id::text FROM likes WHERE user_id = $1 AND post_id = ANY($2::uuid[])`, userID, postIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, nil, err
+	}
+	mine := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		mine[id] = true
+	}
+	return counts, mine, nil
+}
+
+func (s *Store) LikeCounts(ctx context.Context, postIDs []string) (map[string]int, error) {
+	out := map[string]int{}
+	if len(postIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT post_id::text, count(*) FROM likes WHERE post_id = ANY($1::uuid[]) GROUP BY post_id`, postIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RecentLikedPostIDs(ctx context.Context, userID int64, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT l.post_id::text FROM likes l JOIN posts p ON p.id = l.post_id
+		WHERE l.user_id = $1 AND p.deleted_at IS NULL
+		ORDER BY l.created_at DESC LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+func (s *Store) AuthorAffinity(ctx context.Context, userID int64) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.username, count(*) FROM likes l
+		JOIN posts p ON p.id = l.post_id JOIN users u ON u.id = p.author_id
+		WHERE l.user_id = $1 GROUP BY u.username`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
+	}
+	return out, rows.Err()
+}
+
 // MediaKeysInUse returns which of keys are referenced by a live post.
 func (s *Store) MediaKeysInUse(ctx context.Context, keys []string) (map[string]bool, error) {
 	rows, err := s.pool.Query(ctx,
