@@ -2,170 +2,159 @@
 
 [![CI](https://github.com/polo2444172276/networkai/actions/workflows/ci.yml/badge.svg)](https://github.com/polo2444172276/networkai/actions/workflows/ci.yml)
 
-Backend for a social posting and discovery app, written in Go. Users post text,
-images and video, browse a chronological feed, and run full-text search.
+A social posting and discovery app, with a Go backend and a Next.js
+frontend. Users post text, images and video, browse a chronological feed,
+get a personalised "For you" feed, search, like posts, and can ask an LLM to
+polish a draft.
 
-The interesting part is the data path. **PostgreSQL is the source of truth**,
-and Elasticsearch is a derived search index kept in sync by a
-**transactional outbox**. The service keeps accepting posts during a search
-outage and loses nothing when search comes back.
+The engineering focus is the data path and how it behaves under failure and
+load:
+- **PostgreSQL is the source of truth.** Elasticsearch is a derived index
+  kept in sync by a **transactional outbox**, so a search outage loses no
+  writes.
+- **The personalised feed** is a two-stage recommender: kNN retrieval on
+  post embeddings, then a learned ranker, evaluated offline with nDCG@10.
+- Every claim below has a test, a script, or a measured number behind it.
+
+<img src="docs/img/profile.png" alt="Profile page" width="520">
 
 ```mermaid
 flowchart LR
-    C[Client] -->|REST + JWT| API[Go API]
-    API -->|"1 tx: post row + outbox row"| PG[(PostgreSQL<br/>source of truth)]
-    API -->|media files| OBJ[(Local disk / GCS)]
-    API -->|GET /posts: browse| PG
-    API -->|GET /posts/search| ES[(Elasticsearch<br/>search index)]
-    IDX[Indexer worker] -->|"poll outbox<br/>FOR UPDATE SKIP LOCKED"| PG
-    IDX -->|"re-read post, index with<br/>external version"| ES
+    W[Next.js web] -->|REST + JWT| API[Go API]
+    API -->|"1 tx: post + outbox row"| PG[(PostgreSQL<br/>source of truth)]
+    API -->|media| OBJ[(disk / GCS)]
+    API -->|browse| PG
+    API -->|search, feed retrieval| ES[(Elasticsearch<br/>text + vectors)]
+    API -.->|rewrite draft| LLM[LLM API]
+    IDX[Indexer] -->|poll outbox<br/>SKIP LOCKED| PG
+    IDX -->|embed + index<br/>external version| ES
+    P[Prometheus] -.->|scrape| API & IDX
 ```
+
+## Key numbers
+
+| | Result | Evidence |
+|---|---|---|
+| Search outage | 150 s outage: **0 writes lost, 0 events dead-lettered**; alert fired at ~270 s and resolved after recovery | [engineering log](docs/engineering-log.md), `TestElasticsearchOutageLosesNoWrites` |
+| Throughput (one 4-vCPU VM, load generator included) | ~1,200 req/s mixed traffic, **0% errors on core endpoints**, search P95 67 ms | [benchmark](docs/benchmark.md) |
+| Feed overload fix | at 1000 req/s: search P50 **4.4 s → 20 ms**, ES rejections 51k → 0 | [benchmark](docs/benchmark.md#beforeafter-the-feed-starving-search) |
+| Full reindex, 100k posts | **134 s → 4.7 s** (`_bulk`, A/B on the same data) | [engineering log](docs/engineering-log.md) |
+| Feed ranking (offline, **synthetic data**) | nDCG@10 **+14.0%** vs chronological on 300k held-out impressions | [ranking eval](docs/ranking-eval.md), [why synthetic](docs/ranking.md#the-data-is-synthetic-and-this-is-what-that-means) |
+| Tests | Go: unit + integration + e2e with the race detector (74% coverage); Playwright: 8 UI flows; CI runs all of it | [CI](.github/workflows/ci.yml) |
 
 ## Quick start
 
-Requires Docker, plus `curl` and `jq` for the scripts.
+Requires Docker, plus `curl` and `jq` for the scripts. k6 is needed for the
+load test.
 
 ```bash
-make up            # postgres, elasticsearch, api (:8080), indexer
-make seed          # demo users and posts, then a couple of searches
-make demo-outage   # stop Elasticsearch, keep posting, recover, lose nothing
-make test-integration
-```
+make up             # postgres, elasticsearch, api (:8080), indexer
+make seed           # a few demo users and posts
+make demo-outage    # stop Elasticsearch, keep posting, recover, lose nothing
+cd web && npm ci && npm run dev    # http://localhost:3000
 
-<details>
-<summary>What <code>make demo-outage</code> prints (recorded run)</summary>
-
-```text
-1. Stopping Elasticsearch
-2. Posting 5 times while search is down
-  created 6a05f26d-85ed-4a5a-ac22-f72d37220031
-  ...
-3. Browsing still works (served from PostgreSQL):
-  Outage post 5 about kayaking
-4. Search degrades to a clean 503 instead of a crash:
-{"error":{"code":"search_unavailable","message":"search is temporarily unavailable; browsing and posting still work"},"request_id":"bcbd82bb754b8450"}
-5. Outbox backlog (events waiting to be indexed):
-{ "pending": 5, "dead": 0, "oldest_pending_seconds": 0.055 }
-6. Starting Elasticsearch again
-7. All posts written during the outage are searchable:
-  Outage post 5 about kayaking
-  ... (all 5)
-{ "pending": 0, "dead": 0, "oldest_pending_seconds": 0 }
+# Optional: 100k synthetic posts, embeddings, trained ranker, load test
+make synth train load-synth
+RATE=500 make loadtest
+docker compose --profile observability up -d   # Prometheus on :9090
 ```
-</details>
 
 ## API
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `POST` | `/users` | – | `{"username","password"}`; bcrypt-hashed |
-| `POST` | `/auth/login` | – | returns `{"token","expires_at"}` (JWT, HS256) |
-| `POST` | `/posts` | JWT | multipart: `message`, optional `media_file` (type sniffed from content) |
-| `GET` | `/posts?author=&limit=&cursor=` | – | chronological, from PostgreSQL, keyset pagination |
-| `GET` | `/posts/search?q=&author=&type=&limit=&cursor=` | – | Elasticsearch relevance ranking, `search_after` pagination |
-| `GET` | `/posts/{id}` | – | |
-| `PATCH` | `/posts/{id}` | owner | `{"message"}` |
-| `DELETE` | `/posts/{id}` | owner | soft delete; media file removed |
-| `GET` | `/healthz`, `/readyz` | – | `/readyz` includes outbox lag |
+| `POST` | `/users`, `/auth/login` | – | bcrypt; JWT (HS256, pinned) |
+| `POST` | `/posts` | JWT | JSON `{"message"}` or multipart with `media_file` (type sniffed) |
+| `GET` | `/posts?author=&cursor=` | optional | chronological, from PostgreSQL, keyset pagination |
+| `GET` | `/posts/search?q=&author=&type=&cursor=` | optional | Elasticsearch, `search_after` pagination |
+| `GET` / `PATCH` / `DELETE` | `/posts/{id}` | owner for writes | soft delete |
+| `POST` / `DELETE` | `/posts/{id}/like` | JWT | idempotent |
+| `GET` | `/feed` | JWT | personalised; each item explains its score, features and sources |
+| `POST` | `/assist/rewrite` | JWT | `{"mode": "polish\|shorten\|hashtags", "draft"}` |
+| `GET` | `/healthz`, `/readyz`, `/metrics` | – | `/readyz` includes outbox lag |
 
-Every error has the same shape:
-`{"error":{"code":"forbidden","message":"..."},"request_id":"..."}`.
+Errors always look like `{"error":{"code","message"},"request_id"}`.
 
 ## Design decisions
 
-Each one has a short ADR with the alternatives considered:
+| ADR | Decision |
+|---|---|
+| [0001](docs/adr/0001-postgres-source-of-truth-with-outbox.md) | PostgreSQL as source of truth; transactional outbox instead of dual writes or CDC |
+| [0002](docs/adr/0002-idempotent-order-independent-indexing.md) | Events carry ids; indexer re-reads the row; external versions + tombstones make replays and reordering harmless |
+| [0003](docs/adr/0003-pause-worker-on-dependency-outage.md) | A dependency outage pauses the worker instead of burning per-event retries (bug found in the outage demo) |
+| [0004](docs/adr/0004-llm-writing-assistant.md) | The LLM is an unreliable, metered dependency: timeout, one retry, per-user limit, token/cost accounting, injection mitigation, graceful fallback |
+| [ranking.md](docs/ranking.md) | Two-stage feed: kNN retrieval → logistic-regression ranker → author diversity; bulkhead so the feed cannot starve search |
 
-- **[0001](docs/adr/0001-postgres-source-of-truth-with-outbox.md)**: PostgreSQL as
-  source of truth, synced to Elasticsearch through a transactional outbox
-  rather than dual writes or CDC.
-- **[0002](docs/adr/0002-idempotent-order-independent-indexing.md)**: idempotent,
-  order-independent indexing. Events carry only an id, the indexer re-reads
-  the current row and writes with Elasticsearch external versioning, and
-  deletes are version-carrying tombstones.
-- **[0003](docs/adr/0003-pause-worker-on-dependency-outage.md)**: an unavailable
-  dependency pauses the worker instead of spending per-event retries. This
-  fixes a bug found during the outage demo.
+## Documentation
 
-Smaller choices are documented in code comments next to where they apply:
-- keyset pagination instead of `OFFSET`;
-- timing-safe login, so usernames can't be discovered by timing;
-- JWT algorithm pinning;
-- upload content sniffing;
-- compensating deletes for orphaned uploads;
-- `/readyz` deliberately not depending on Elasticsearch.
+- [benchmark.md](docs/benchmark.md): load-test method, results, before/after, caveats
+- [engineering-log.md](docs/engineering-log.md): every real bug and bottleneck, how it was found, fixed and verified
+- [bottlenecks.md](docs/bottlenecks.md): open environment blockers and remaining limits (Chinese)
+- [runbook.md](docs/runbook.md): what to do when each alert fires
+- [ranking.md](docs/ranking.md) / [ranking-eval.md](docs/ranking-eval.md): feed design and generated offline evaluation
+- [docs/learn/](docs/learn/README.md): study notes and an interview question bank (Chinese)
 
 ## Testing
 
 ```bash
-make test               # unit tests; integration tests skip without databases
-make test-integration   # everything, against real PostgreSQL + Elasticsearch
+make test               # Go unit tests (integration tests skip without databases)
+make test-integration   # + PostgreSQL / Elasticsearch integration and e2e tests
+make web-test           # frontend lint, typecheck, build, Playwright
 ```
 
-Integration tests each get a fresh database and an isolated index, so they run
-in parallel. CI runs all of them with the race detector against real service
-containers. Some of the properties under test:
+Key properties are checked by tests that were **mutation-checked**: we
+deliberately broke the code and confirmed the test fails. The broken
+versions were:
+- no external versioning;
+- no outbox insert;
+- no `SKIP LOCKED`;
+- no outage pause;
+- no rebuild catch-up;
+- a TF formula that drifts from the Python trainer.
 
-| Property | Test |
-|---|---|
-| A post change and its outbox event commit or roll back together | `TestFailedPostWriteLeavesNoOutboxEvent` |
-| An Elasticsearch outage loses no writes, including edits and deletes made during it | `TestElasticsearchOutageLosesNoWrites` |
-| Stale, duplicate and out-of-order index writes converge to the latest state | `TestOutOfOrderIndexWritesConverge` |
-| A long dependency outage dead-letters nothing | `TestUnavailableDependencyPausesWithoutSpendingRetries` |
-| Parallel workers process each event exactly once, and actually in parallel | `TestConcurrentWorkersClaimDisjointEvents` |
-| Pagination never skips or repeats items under timestamp ties | `TestListPostsKeysetPagination`, `TestSearchPaginationAndFilters` |
-| `alg: none`, expired, tampered and wrong-issuer tokens are rejected | `TestTokenRejections` |
+## Known limitations
 
-The key tests were checked by **deliberately breaking the code** and confirming
-that they fail:
-- removing external versioning;
-- removing the outbox insert;
-- dropping `SKIP LOCKED`;
-- disabling the outage pause.
-
-## Known limitations and what would change at scale
-
-- **Single region, single PostgreSQL primary.** Read replicas would serve
-  `GET /posts` if browse traffic dominated.
-- **Polling outbox.** It is simple and durable, with roughly 0.5 s added
-  latency. Options are `LISTEN/NOTIFY` to wake the worker, or Debezium CDC
-  if several consumers need the change stream.
-- **Tombstones and processed outbox rows accumulate.** Outbox rows are pruned
-  after 7 days. Tombstone purging is not implemented yet.
-- **Orphaned media is possible** if the process crashes between upload and
-  commit. This needs a periodic sweep.
-- **Search ranking is BM25 plus a boost for exact wording.** It has no
-  personalization yet (see roadmap).
-- **Not load-tested yet.** No latency or throughput numbers are claimed until
-  there is a reproducible benchmark.
-
-## Roadmap
-
-- [ ] k6 load test with a published methodology (P95 latency, RPS)
-- [ ] Prometheus metrics and an alert on outbox lag
-- [ ] Next.js frontend
-- [ ] Personalized feed: candidate retrieval plus a feature-based ranker, evaluated offline with nDCG@10 against the chronological baseline
-- [ ] Tombstone purge and orphaned-media sweep
+- **The feed is the most expensive endpoint by ~10x.** With 2 concurrent
+  slots it serves ~22 req/s under mixed load on this VM and sheds the rest
+  (the UI falls back to Latest). Next steps:
+  - cache each user's candidates;
+  - precompute feeds for active users;
+  - isolate vector search on its own Elasticsearch capacity.
+- **The ranking evaluation uses synthetic data.** No public dataset was
+  reachable from the build environment. The pipeline accepts a real one
+  unchanged.
+- **The LLM assistant's real latency and cost are unmeasured.** No provider
+  was reachable from the build environment; the instrumentation is in
+  place.
+- **Single region and a single PostgreSQL primary.** The polling outbox
+  adds ~0.5 s of search lag. Orphaned media and tombstones are cleaned by
+  periodic jobs.
+- **Benchmarks ran with the load generator on the same 4 vCPUs** as the
+  services.
 
 ## Project history
 
 The first two commits are the original prototype: Go, Elasticsearch as the
-only datastore, plaintext passwords, and GCS objects with public ACLs. The
-commits after them rebuild it into the design above. The commit messages
-describe each defect that was fixed and why.
+only datastore, plaintext passwords, and public-ACL GCS objects. Everything
+after them rebuilds it. Each commit message explains what was wrong and why
+it changed.
 
 ## Layout
 
 ```
-cmd/networkai/        main: api | indexer | migrate | reindex
+cmd/networkai/        api | indexer | migrate | reindex [-fresh] | sweep-media
 internal/httpapi/     routing, middleware, handlers, error mapping
-internal/store/       PostgreSQL access; every post write also writes the outbox
+internal/store/       PostgreSQL; every post write also writes the outbox
 internal/outbox/      outbox worker: claiming, retries, dead-letter, pause
-internal/indexer/     outbox event -> Elasticsearch document
-internal/search/      Elasticsearch client, index mapping and analyzers
-internal/auth/        bcrypt, JWT
-internal/media/       local disk / GCS storage behind one interface
-internal/db/          connection pool and SQL migrations
-internal/e2e/         end-to-end tests over HTTP
-docs/adr/             architecture decision records
-docs/learn/           study notes (Chinese)
+internal/indexer/     events -> Elasticsearch, bulk reindex, blue/green rebuild
+internal/search/      Elasticsearch client: mapping, analyzers, search, kNN
+internal/feed/        two-stage personalised feed + bulkhead
+internal/embed/       LSA embeddings (parity-tested against the trainer)
+internal/assist/      LLM writing assistant
+internal/metrics/     Prometheus metrics
+internal/auth, media, maintenance, db, e2e
+web/                  Next.js frontend + Playwright tests
+tools/                synthetic data, ranking trainer/evaluator, k6 load test
+models/               trained embedding + ranker (small JSON files)
+deploy/prometheus/    scrape config and alert rules
 ```
