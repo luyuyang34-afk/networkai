@@ -67,6 +67,15 @@ export function Composer() {
     },
   });
 
+  // Writing assistant: the suggestion is shown next to the draft and only
+  // replaces it when the user accepts, so a bad or failed suggestion never
+  // costs them their text.
+  const [suggestion, setSuggestion] = useState<string | null>(null);
+  const assist = useMutation({
+    mutationFn: (mode: "polish" | "shorten" | "hashtags") => api.rewrite(mode, message),
+    onSuccess: (r) => setSuggestion(r.suggestion),
+  });
+
   const tooLong = message.length > MAX_CHARS;
   const empty = message.trim() === "" && !file;
   return (
@@ -92,6 +101,16 @@ export function Composer() {
             </Button>
           </div>
         )}
+        {suggestion !== null && (
+          <div data-testid="suggestion" className="space-y-2 rounded-md border border-border bg-muted p-3 text-sm">
+            <p className="whitespace-pre-wrap">{suggestion}</p>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setSuggestion(null)}>Discard</Button>
+              <Button type="button" size="sm" onClick={() => { setMessage(suggestion); setSuggestion(null); }}>Use this</Button>
+            </div>
+          </div>
+        )}
+        {assist.isError && <Alert>{errorText(assist.error)}</Alert>}
         {create.isError && <Alert>{errorText(create.error)}</Alert>}
         <div className="flex items-center gap-2">
           <input
@@ -104,6 +123,18 @@ export function Composer() {
           <Button type="button" variant="ghost" size="icon" aria-label="Attach media" onClick={() => fileRef.current?.click()}>
             <ImagePlus className="h-4 w-4" />
           </Button>
+          <select
+            aria-label="Improve with AI"
+            className="h-8 rounded-md border border-border bg-card px-2 text-xs text-muted-foreground"
+            value=""
+            disabled={message.trim() === "" || assist.isPending}
+            onChange={(e) => e.target.value && assist.mutate(e.target.value as "polish" | "shorten" | "hashtags")}
+          >
+            <option value="">{assist.isPending ? "Thinking…" : "✨ Improve"}</option>
+            <option value="polish">Polish</option>
+            <option value="shorten">Shorten</option>
+            <option value="hashtags">Add hashtags</option>
+          </select>
           <span className={tooLong ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
             {message.length}/{MAX_CHARS}
           </span>

@@ -102,3 +102,14 @@ test("For you tab shows recommendations", async ({ page }) => {
   // A brand-new user is cold-start: the fresh source still returns posts.
   await expect(page.getByTestId("post").first()).toBeVisible();
 });
+
+test("writing assistant failure keeps the draft", async ({ page }) => {
+  await signUp(page);
+  const draft = `my draft ${unique()}`;
+  await page.getByLabel("New post").fill(draft);
+  await page.getByLabel("Improve with AI").selectOption("polish");
+  // Without an LLM key configured the API answers 503 assist_unavailable;
+  // the editor must say so and leave the draft untouched.
+  await expect(page.locator("form").getByRole("alert")).toContainText(/assistant/i);
+  await expect(page.getByLabel("New post")).toHaveValue(draft);
+});

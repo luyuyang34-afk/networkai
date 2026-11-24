@@ -111,6 +111,12 @@ export const api = {
     if (p.cursor) q.set("cursor", p.cursor);
     return request<Page<Post>>(`/posts/search?${q}`, { auth: true });
   },
+  rewrite: (mode: "polish" | "shorten" | "hashtags", draft: string) =>
+    request<{ suggestion: string; model: string; latency_ms: number }>("/assist/rewrite", {
+      method: "POST",
+      body: JSON.stringify({ mode, draft }),
+      auth: true,
+    }),
   forYou: () => request<Page<Post>>(`/feed?limit=30`, { auth: true }),
   like: (id: string) => request<void>(`/posts/${id}/like`, { method: "POST", auth: true }),
   unlike: (id: string) => request<void>(`/posts/${id}/like`, { method: "DELETE", auth: true }),
