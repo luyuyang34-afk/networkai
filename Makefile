@@ -1,6 +1,7 @@
 # Common tasks. `make help` lists them.
 TEST_DATABASE_URL ?= postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable
 TEST_ES_URL       ?= http://localhost:9200
+TEST_REDIS_URL    ?= redis://localhost:6379/0
 
 .PHONY: help up down logs lint test test-integration seed demo-outage reindex \
 	synth train load-synth rebuild loadtest web-test
@@ -26,8 +27,9 @@ test: ## Unit tests (integration tests skip without databases)
 	go test -race ./...
 
 test-integration: ## All tests against PostgreSQL + Elasticsearch from docker compose
-	docker compose up -d --wait postgres elasticsearch
-	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_ES_URL='$(TEST_ES_URL)' go test -race -count=1 ./...
+	docker compose up -d --wait postgres elasticsearch redis
+	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_ES_URL='$(TEST_ES_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+		go test -race -count=1 ./...
 
 seed: ## Create demo users and posts
 	./scripts/seed.sh

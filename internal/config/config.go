@@ -53,6 +53,12 @@ type Config struct {
 	LLMPriceOutPerM     float64
 	LLMPerUserPerMinute int
 
+	// Home timeline (Redis). CelebrityThreshold: authors with at least this
+	// many followers are pulled at read time instead of pushed on write.
+	RedisURL           string
+	CelebrityThreshold int64
+	TimelineCap        int64
+
 	IndexerBatchSize   int
 	IndexerPoll        time.Duration
 	IndexerMaxAttempts int
@@ -73,6 +79,7 @@ func Load() (Config, error) {
 		GCSBucket:          os.Getenv("GCS_BUCKET"),
 		CORSOrigins:        splitList(env("CORS_ORIGINS", "http://localhost:3000")),
 		ModelDir:           env("MODEL_DIR", "./models"),
+		RedisURL:           env("REDIS_URL", "redis://localhost:6379/0"),
 		LLMBaseURL:         env("LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:          os.Getenv("OPENAI_API_KEY"),
 		LLMModel:           env("LLM_MODEL", "gpt-4o-mini"),
@@ -87,6 +94,8 @@ func Load() (Config, error) {
 	c.IndexerBatchSize = intEnv("INDEXER_BATCH_SIZE", c.IndexerBatchSize, &errs)
 	c.IndexerMaxAttempts = intEnv("INDEXER_MAX_ATTEMPTS", c.IndexerMaxAttempts, &errs)
 	c.FeedMaxConcurrent = intEnv("FEED_MAX_CONCURRENT", 2, &errs)
+	c.CelebrityThreshold = int64(intEnv("CELEBRITY_THRESHOLD", 10000, &errs))
+	c.TimelineCap = int64(intEnv("TIMELINE_CAP", 800, &errs))
 	c.FeedLexical = os.Getenv("FEED_LEXICAL") == "true"
 	c.LLMPerUserPerMinute = intEnv("LLM_PER_USER_PER_MINUTE", 20, &errs)
 	c.LLMPriceInPerM = floatEnv("LLM_PRICE_IN_PER_M", &errs)

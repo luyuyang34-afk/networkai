@@ -36,6 +36,9 @@ type Registry struct {
 	outboxPaused   prometheus.Gauge
 	searchRequests *prometheus.CounterVec
 
+	fanoutFollowers prometheus.Histogram
+	fanoutDuration  prometheus.Histogram
+
 	llmRequests *prometheus.CounterVec
 	llmTokens   *prometheus.CounterVec
 	llmCost     prometheus.Counter
@@ -71,6 +74,16 @@ func New() *Registry {
 			Name: "networkai_search_requests_total",
 			Help: "Search requests by outcome (ok, unavailable, error).",
 		}, []string{"outcome"}),
+		fanoutFollowers: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "networkai_timeline_fanout_followers",
+			Help:    "Followers written to per pushed post (fan-out on write).",
+			Buckets: prometheus.ExponentialBuckets(1, 4, 10),
+		}),
+		fanoutDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "networkai_timeline_fanout_duration_seconds",
+			Help:    "Time to push one post to all followers' timelines.",
+			Buckets: []float64{.001, .005, .01, .05, .1, .5, 1, 5, 15, 60},
+		}),
 		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "networkai_llm_requests_total",
 			Help: "Writing-assistant LLM requests by outcome (ok, error, rate_limited).",
@@ -93,7 +106,7 @@ func New() *Registry {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.httpRequests, r.httpDuration, r.outboxEvents, r.outboxHandle, r.outboxPaused, r.searchRequests,
-		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency,
+		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency, r.fanoutFollowers, r.fanoutDuration,
 	)
 	return r
 }
@@ -122,6 +135,11 @@ func (r *Registry) ObserveLLM(_ string, outcome string, u assist.Usage, costUSD 
 	r.llmTokens.WithLabelValues("output").Add(float64(u.OutputTokens))
 	r.llmCost.Add(costUSD)
 	r.llmLatency.Observe(d.Seconds())
+}
+
+func (r *Registry) ObserveFanout(followers int, d time.Duration) {
+	r.fanoutFollowers.Observe(float64(followers))
+	r.fanoutDuration.Observe(d.Seconds())
 }
 
 func (r *Registry) ObserveSearch(outcome string) { r.searchRequests.WithLabelValues(outcome).Inc() }

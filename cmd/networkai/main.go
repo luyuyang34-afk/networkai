@@ -35,8 +35,10 @@ import (
 	"networkai/internal/outbox"
 	"networkai/internal/search"
 	"networkai/internal/store"
+	"networkai/internal/timeline"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -160,6 +162,8 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		Likes:          st,
 		Feed:           loadFeed(cfg, st, es, log),
 		Assistant:      loadAssistant(cfg, m, log),
+		Social:         st,
+		Timelines:      openTimelines(cfg, st, nil, log),
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -214,17 +218,29 @@ func runIndexer(ctx context.Context, cfg config.Config, st *store.Store, pool *p
 	go purgeTombstonesPeriodically(ctx, es, log)
 
 	ix := &indexer.Indexer{Posts: st, Index: es, Log: log, Embed: loadEmbedder(cfg, log)}
+	tl := openTimelines(cfg, st, m, log)
+	// One worker, two jobs: index for search, then fan out to timelines.
+	// Coupled on purpose for now; see the CDC change that splits them.
+	handle := func(ctx context.Context, ev outbox.Event) error {
+		if err := ix.Handle(ctx, ev); err != nil {
+			return err
+		}
+		if tl == nil {
+			return nil
+		}
+		return tl.Handle(ctx, ev)
+	}
 	w := &outbox.Worker{
 		OnEvent:      m.ObserveOutboxEvent,
 		OnPause:      m.SetOutboxPaused,
 		Pool:         pool,
-		Handle:       ix.Handle,
+		Handle:       handle,
 		BatchSize:    cfg.IndexerBatchSize,
 		PollInterval: cfg.IndexerPoll,
 		MaxAttempts:  cfg.IndexerMaxAttempts,
 		Log:          log,
 		IsUnavailable: func(err error) bool {
-			return errors.Is(err, search.ErrUnavailable)
+			return errors.Is(err, search.ErrUnavailable) || errors.Is(err, timeline.ErrUnavailable)
 		},
 	}
 	return w.Run(ctx)
@@ -262,6 +278,20 @@ func loadAssistant(cfg config.Config, m *metrics.Registry, log *slog.Logger) htt
 		Limiter:  assist.NewLimiter(cfg.LLMPerUserPerMinute),
 		Observer: m,
 	}
+}
+
+func openTimelines(cfg config.Config, st *store.Store, m *metrics.Registry, log *slog.Logger) *timeline.Service {
+	opt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Warn("invalid REDIS_URL; home timeline disabled", "err", err)
+		return nil
+	}
+	svc := &timeline.Service{Redis: redis.NewClient(opt), Store: st,
+		CelebrityThreshold: cfg.CelebrityThreshold, Cap: cfg.TimelineCap}
+	if m != nil {
+		svc.OnFanout = m.ObserveFanout
+	}
+	return svc
 }
 
 func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {

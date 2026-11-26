@@ -18,6 +18,12 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U networkai"
           --health-interval 2s --health-retries 30
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-retries 30
       elasticsearch:
         image: elasticsearch:8.15.3
         env:
@@ -31,6 +37,7 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable
       TEST_ES_URL: http://localhost:9200
+      TEST_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

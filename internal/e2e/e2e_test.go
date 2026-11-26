@@ -31,6 +31,7 @@ import (
 	"networkai/internal/search"
 	"networkai/internal/store"
 	"networkai/internal/testutil"
+	"networkai/internal/timeline"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -630,4 +631,43 @@ func TestRebuildFreshSwapsAliasAndCatchesUp(t *testing.T) {
 			r.Body.Close()
 		}
 	})
+}
+
+// Over HTTP: follow, post, read the home timeline; unfollow drops the
+// followee's posts immediately (the cached timeline is invalidated).
+func TestHomeTimelineOverHTTP(t *testing.T) {
+	e := setup(t)
+	rdb, prefix := testutil.Redis(t)
+	st := store.New(e.pool)
+	tl := &timeline.Service{Redis: rdb, Store: st, CelebrityThreshold: 1000, Prefix: prefix}
+	api := httptest.NewServer(httpapi.New(httpapi.Deps{
+		Users: st, Posts: st, Search: e.es, Media: mustLocal(t), Social: st, Timelines: tl,
+		Tokens: auth.NewTokens([]byte(strings.Repeat("k", 32)), time.Hour), Log: quiet,
+	}))
+	defer api.Close()
+	e.api = api
+	alice, bob := e.login("alice"), e.login("bob")
+
+	if code, _ := e.do("POST", "/users/bob/follow", alice, nil, ""); code != http.StatusNoContent {
+		t.Fatalf("follow: %d", code)
+	}
+	if code, body := e.do("GET", "/users/bob", alice, nil, ""); code != 200 || body["follower_count"].(float64) != 1 || body["followed_by_me"] != true {
+		t.Fatalf("profile: %d %v", code, body)
+	}
+	id := e.createPost(bob, "hello followers")
+	ev := outbox.Event{AggregateType: store.AggregatePost, AggregateID: id}
+	if err := tl.Handle(context.Background(), ev); err != nil { // what the worker does
+		t.Fatal(err)
+	}
+	code, body := e.do("GET", "/timeline", alice, nil, "")
+	if code != 200 || len(body["items"].([]any)) != 1 {
+		t.Fatalf("timeline: %d %v", code, body)
+	}
+	e.do("DELETE", "/users/bob/follow", alice, nil, "")
+	if _, body := e.do("GET", "/timeline", alice, nil, ""); len(body["items"].([]any)) != 0 {
+		t.Fatalf("after unfollow: %v", body)
+	}
+	if code, _ := e.do("POST", "/users/alice/follow", alice, nil, ""); code != http.StatusBadRequest {
+		t.Fatalf("self-follow: %d", code)
+	}
 }

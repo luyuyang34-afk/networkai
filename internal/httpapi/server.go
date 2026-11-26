@@ -77,6 +77,8 @@ type Deps struct {
 	Likes     Likes
 	Feed      Feed
 	Assistant Assistant
+	Social    Social
+	Timelines Timelines
 }
 
 type Server struct {
@@ -92,6 +94,8 @@ type Server struct {
 	likes     Likes
 	feed      Feed
 	assistant Assistant
+	social    Social
+	timelines Timelines
 }
 
 func New(d Deps) http.Handler {
@@ -99,6 +103,7 @@ func New(d Deps) http.Handler {
 		users: d.Users, posts: d.Posts, search: d.Search, media: d.Media, ready: d.Ready,
 		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes, metrics: d.Metrics,
 		likes: d.Likes, feed: d.Feed, assistant: d.Assistant,
+		social: d.Social, timelines: d.Timelines,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -121,6 +126,10 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /posts/{id}/like", s.requireAuth(s.unlikePost))
 	mux.HandleFunc("GET /feed", s.requireAuth(s.forYou))
 	mux.HandleFunc("POST /assist/rewrite", s.requireAuth(s.rewrite))
+	mux.HandleFunc("GET /users/{username}", s.optionalAuth(s.getProfile))
+	mux.HandleFunc("POST /users/{username}/follow", s.requireAuth(s.follow))
+	mux.HandleFunc("DELETE /users/{username}/follow", s.requireAuth(s.unfollow))
+	mux.HandleFunc("GET /timeline", s.requireAuth(s.homeTimeline))
 	mux.HandleFunc("POST /posts", s.requireAuth(s.createPost))
 	mux.HandleFunc("PATCH /posts/{id}", s.requireAuth(s.updatePost))
 	mux.HandleFunc("DELETE /posts/{id}", s.requireAuth(s.deletePost))
