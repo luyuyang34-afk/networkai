@@ -113,3 +113,13 @@ test("writing assistant failure keeps the draft", async ({ page }) => {
   await expect(page.locator("form").getByRole("alert")).toContainText(/assistant/i);
   await expect(page.getByLabel("New post")).toHaveValue(draft);
 });
+
+test("follow someone and see their posts in Following", async ({ page }) => {
+  await signUp(page);
+  await page.goto("/u/alice"); // created by scripts/seed.sh
+  await page.getByRole("button", { name: "Follow" }).click();
+  await expect(page.getByRole("button", { name: "Unfollow" })).toBeVisible();
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Following" }).click();
+  await expect(page.getByTestId("post").first()).toContainText("@alice");
+});

@@ -117,6 +117,18 @@ export const api = {
       body: JSON.stringify({ mode, draft }),
       auth: true,
     }),
+  profile: (username: string) =>
+    request<{ username: string; follower_count: number; following_count: number; followed_by_me: boolean }>(
+      `/users/${encodeURIComponent(username)}`,
+      { auth: true },
+    ),
+  follow: (username: string) =>
+    request<void>(`/users/${encodeURIComponent(username)}/follow`, { method: "POST", auth: true }),
+  unfollow: (username: string) =>
+    request<void>(`/users/${encodeURIComponent(username)}/follow`, { method: "DELETE", auth: true }),
+  // Home timeline: posts from accounts you follow (cursor = unix ms).
+  timeline: (cursor?: string) =>
+    request<Page<Post>>(`/timeline?limit=20${cursor ? `&cursor=${cursor}` : ""}`, { auth: true }),
   forYou: () => request<Page<Post>>(`/feed?limit=30`, { auth: true }),
   like: (id: string) => request<void>(`/posts/${id}/like`, { method: "POST", auth: true }),
   unlike: (id: string) => request<void>(`/posts/${id}/like`, { method: "DELETE", auth: true }),
