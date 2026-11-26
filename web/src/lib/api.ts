@@ -52,6 +52,26 @@ export const tokenStore = {
   },
 };
 
+// Read-your-writes across database read replicas: every successful write
+// returns X-Consistency-Token (the primary's WAL position); sending it back
+// on later requests makes the server read from a replica only if it has
+// caught up, so users always see their own changes. Kept per tab.
+const CONSISTENCY_KEY = "networkai.consistency";
+let consistencyToken: string | null = null;
+function loadConsistency(): string | null {
+  if (consistencyToken) return consistencyToken;
+  try {
+    consistencyToken = sessionStorage.getItem(CONSISTENCY_KEY);
+  } catch {}
+  return consistencyToken;
+}
+function saveConsistency(t: string) {
+  consistencyToken = t;
+  try {
+    sessionStorage.setItem(CONSISTENCY_KEY, t);
+  } catch {}
+}
+
 // Set by AuthProvider so an expired token anywhere logs the user out once.
 let onUnauthorized: (() => void) | null = null;
 export function setUnauthorizedHandler(fn: () => void) {
@@ -63,6 +83,8 @@ async function request<T>(path: string, init: RequestInit & { auth?: boolean } =
   const token = tokenStore.get();
   if (init.auth && token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  const ct = loadConsistency();
+  if (ct) headers.set("X-Consistency-Token", ct);
 
   let res: Response;
   try {
@@ -70,6 +92,8 @@ async function request<T>(path: string, init: RequestInit & { auth?: boolean } =
   } catch {
     throw new ApiError(0, "network", "Can't reach the server. Check your connection.");
   }
+  const newToken = res.headers.get("X-Consistency-Token");
+  if (newToken) saveConsistency(newToken);
   if (res.status === 204) return undefined as T;
 
   const body = await res.json().catch(() => null);

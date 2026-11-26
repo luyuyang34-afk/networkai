@@ -21,6 +21,9 @@ type Config struct {
 	MetricsAddr string
 
 	DatabaseURL string
+	// ReplicaDatabaseURL, if set, serves staleness-tolerant reads from a
+	// streaming replica, with read-your-writes via consistency tokens.
+	ReplicaDatabaseURL string
 
 	ESURL      string
 	ESUsername string
@@ -71,6 +74,7 @@ func Load() (Config, error) {
 		MetricsAddr:        env("METRICS_ADDR", ":9091"),
 		DatabaseURL:        env("DATABASE_URL", "postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable"),
 		ESURL:              env("ES_URL", "http://localhost:9200"),
+		ReplicaDatabaseURL: os.Getenv("REPLICA_DATABASE_URL"),
 		ESUsername:         os.Getenv("ES_USERNAME"),
 		ESPassword:         os.Getenv("ES_PASSWORD"),
 		JWTSecret:          []byte(os.Getenv("JWT_SECRET")),

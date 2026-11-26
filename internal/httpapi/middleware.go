@@ -11,6 +11,7 @@ import (
 
 	"networkai/internal/auth"
 	"networkai/internal/metrics"
+	"networkai/internal/store"
 )
 
 type ridKey struct{}
@@ -102,9 +103,9 @@ func cors(origins []string, next http.Handler) http.Handler {
 			h := w.Header()
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Add("Vary", "Origin")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, X-Consistency-Token")
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-			h.Set("Access-Control-Expose-Headers", "X-Request-ID")
+			h.Set("Access-Control-Expose-Headers", "X-Request-ID, X-Consistency-Token")
 			h.Set("Access-Control-Max-Age", "600")
 		}
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
@@ -113,6 +114,52 @@ func cors(origins []string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// consistencyToken implements read-your-writes across a read replica:
+//   - an incoming X-Consistency-Token puts its LSN on the context, so the
+//     store serves the read from the replica only if it has caught up;
+//   - after a successful write (POST/PATCH/DELETE answered 2xx) the
+//     response carries a fresh token for the client to send on later reads.
+func consistencyToken(s *Server, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tok := r.Header.Get("X-Consistency-Token"); tok != "" {
+			r = r.WithContext(store.WithConsistencyToken(r.Context(), tok))
+		}
+		if s.consistency == nil || r.Method == http.MethodGet || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(&tokenWriter{ResponseWriter: w, s: s, r: r}, r)
+	})
+}
+
+// tokenWriter adds the token header just before the status line is written
+// (headers cannot change after that), and only for successful writes.
+type tokenWriter struct {
+	http.ResponseWriter
+	s    *Server
+	r    *http.Request
+	done bool
+}
+
+func (t *tokenWriter) WriteHeader(code int) {
+	if !t.done {
+		t.done = true
+		if code >= 200 && code < 300 {
+			if tok, err := t.s.consistency.WriteToken(t.r.Context()); err == nil {
+				t.Header().Set("X-Consistency-Token", tok)
+			}
+		}
+	}
+	t.ResponseWriter.WriteHeader(code)
+}
+
+func (t *tokenWriter) Write(b []byte) (int, error) {
+	if !t.done {
+		t.WriteHeader(http.StatusOK)
+	}
+	return t.ResponseWriter.Write(b)
 }
 
 // optionalAuth attaches the principal when a valid token is present and

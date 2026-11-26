@@ -162,6 +162,18 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		return err
 	}
 	m := apiMetrics(pool)
+	var consistency httpapi.Consistency
+	if cfg.ReplicaDatabaseURL != "" {
+		replica, err := connectWithRetry(ctx, cfg.ReplicaDatabaseURL, log)
+		if err != nil {
+			return fmt.Errorf("replica: %w", err)
+		}
+		defer replica.Close()
+		st.WithReplica(replica, m.ObserveReadRoute)
+		m.RegisterReplicaLag(st)
+		consistency = st
+		log.Info("read replica enabled")
+	}
 
 	handler := httpapi.New(httpapi.Deps{
 		Users: st, Posts: st, Search: es, Media: ms,
@@ -176,6 +188,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 		Feed:           loadFeed(cfg, st, es, log),
 		Assistant:      loadAssistant(cfg, m, log),
 		Social:         st,
+		Consistency:    consistency,
 		Timelines:      openTimelines(cfg, st, nil, log),
 	})
 	srv := &http.Server{

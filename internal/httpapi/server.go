@@ -45,6 +45,11 @@ type Assistant interface {
 	Rewrite(ctx context.Context, userID int64, mode assist.Mode, draft string) (assist.Result, error)
 }
 
+// Consistency issues read-your-writes tokens; optional (read replicas).
+type Consistency interface {
+	WriteToken(ctx context.Context) (string, error)
+}
+
 // Feed is the personalised feed; optional (requires trained models).
 type Feed interface {
 	ForYou(ctx context.Context, userID int64, username string, limit int) ([]feed.Item, error)
@@ -73,29 +78,31 @@ type Deps struct {
 	// LocalMediaDir, if set, is served at /media/ (local media backend only).
 	LocalMediaDir string
 	// Metrics, if set, records request metrics and is served at /metrics.
-	Metrics   *metrics.Registry
-	Likes     Likes
-	Feed      Feed
-	Assistant Assistant
-	Social    Social
-	Timelines Timelines
+	Metrics     *metrics.Registry
+	Likes       Likes
+	Feed        Feed
+	Assistant   Assistant
+	Social      Social
+	Timelines   Timelines
+	Consistency Consistency
 }
 
 type Server struct {
-	users     UserStore
-	posts     PostStore
-	search    Searcher
-	media     media.Store
-	ready     Readiness
-	tokens    *auth.Tokens
-	log       *slog.Logger
-	maxUpload int64
-	metrics   *metrics.Registry
-	likes     Likes
-	feed      Feed
-	assistant Assistant
-	social    Social
-	timelines Timelines
+	users       UserStore
+	posts       PostStore
+	search      Searcher
+	media       media.Store
+	ready       Readiness
+	tokens      *auth.Tokens
+	log         *slog.Logger
+	maxUpload   int64
+	metrics     *metrics.Registry
+	likes       Likes
+	feed        Feed
+	assistant   Assistant
+	social      Social
+	timelines   Timelines
+	consistency Consistency
 }
 
 func New(d Deps) http.Handler {
@@ -103,7 +110,7 @@ func New(d Deps) http.Handler {
 		users: d.Users, posts: d.Posts, search: d.Search, media: d.Media, ready: d.Ready,
 		tokens: d.Tokens, log: d.Log, maxUpload: d.MaxUploadBytes, metrics: d.Metrics,
 		likes: d.Likes, feed: d.Feed, assistant: d.Assistant,
-		social: d.Social, timelines: d.Timelines,
+		social: d.Social, timelines: d.Timelines, consistency: d.Consistency,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -145,6 +152,7 @@ func New(d Deps) http.Handler {
 
 	// Outermost first: request id → recover → access log → CORS → routes.
 	var h http.Handler = mux
+	h = consistencyToken(s, h)
 	h = cors(d.CORSOrigins, h)
 	h = accessLog(s.log, s.metrics, h)
 	h = recoverer(s.log, h)

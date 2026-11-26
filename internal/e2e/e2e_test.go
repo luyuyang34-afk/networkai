@@ -671,3 +671,61 @@ func TestHomeTimelineOverHTTP(t *testing.T) {
 		t.Fatalf("self-follow: %d", code)
 	}
 }
+
+// Over HTTP: a write returns X-Consistency-Token; sending it back makes an
+// immediate read see the write even though the replica is lagging.
+func TestConsistencyTokenOverHTTP(t *testing.T) {
+	e := setup(t)
+	replica := testutil.Replica(t, e.pool)
+	st := store.New(e.pool).WithReplica(replica, nil)
+	api := httptest.NewServer(httpapi.New(httpapi.Deps{
+		Users: st, Posts: st, Search: e.es, Media: mustLocal(t), Consistency: st,
+		Tokens: auth.NewTokens([]byte(strings.Repeat("k", 32)), time.Hour), Log: quiet,
+	}))
+	defer api.Close()
+	e.api = api
+	alice := e.login("alice")
+
+	req, _ := http.NewRequest("POST", api.URL+"/posts", strings.NewReader(`{"message":"read me back"}`))
+	req.Header.Set("Authorization", "Bearer "+alice)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	token := resp.Header.Get("X-Consistency-Token")
+	if resp.StatusCode != http.StatusCreated || token == "" {
+		t.Fatalf("create: %d token=%q", resp.StatusCode, token)
+	}
+
+	list := func(tok string) int {
+		req, _ := http.NewRequest("GET", api.URL+"/posts?author=alice", nil)
+		if tok != "" {
+			req.Header.Set("X-Consistency-Token", tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		json.NewDecoder(resp.Body).Decode(&body) //nolint:errcheck
+		return len(body["items"].([]any))
+	}
+	if n := list(""); n != 0 {
+		t.Fatalf("without a token the lagging replica should not have the post yet (got %d); is the replica delayed?", n)
+	}
+	if n := list(token); n != 1 {
+		t.Fatalf("with the token the post must be visible, got %d", n)
+	}
+	// Reads never get a token header; failed writes don't either.
+	bad, _ := http.NewRequest("POST", api.URL+"/posts", strings.NewReader(`{"message":""}`))
+	bad.Header.Set("Authorization", "Bearer "+alice)
+	bad.Header.Set("Content-Type", "application/json")
+	r2, _ := http.DefaultClient.Do(bad)
+	r2.Body.Close()
+	if r2.StatusCode != 400 || r2.Header.Get("X-Consistency-Token") != "" {
+		t.Fatalf("failed write: %d token=%q", r2.StatusCode, r2.Header.Get("X-Consistency-Token"))
+	}
+}

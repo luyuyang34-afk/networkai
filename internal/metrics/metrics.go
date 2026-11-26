@@ -36,6 +36,8 @@ type Registry struct {
 	outboxPaused   prometheus.Gauge
 	searchRequests *prometheus.CounterVec
 
+	readRoutes *prometheus.CounterVec
+
 	consumerEvents *prometheus.CounterVec
 	consumerLag    *prometheus.GaugeVec
 	relayEvents    prometheus.Counter
@@ -79,6 +81,10 @@ func New() *Registry {
 			Name: "networkai_search_requests_total",
 			Help: "Search requests by outcome (ok, unavailable, error).",
 		}, []string{"outcome"}),
+		readRoutes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "networkai_db_read_routes_total",
+			Help: "Read routing decisions: replica, primary_token (replica behind the client's token), primary_forced, primary_error.",
+		}, []string{"target"}),
 		consumerEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "networkai_consumer_events_total",
 			Help: "Events handled per consumer group, by result (ok, retry, paused, dead).",
@@ -129,7 +135,7 @@ func New() *Registry {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.httpRequests, r.httpDuration, r.outboxEvents, r.outboxHandle, r.outboxPaused, r.searchRequests,
 		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency, r.fanoutFollowers, r.fanoutDuration,
-		r.consumerEvents, r.consumerLag, r.relayEvents, r.relayDelay,
+		r.consumerEvents, r.consumerLag, r.relayEvents, r.relayDelay, r.readRoutes,
 	)
 	return r
 }
@@ -158,6 +164,42 @@ func (r *Registry) ObserveLLM(_ string, outcome string, u assist.Usage, costUSD 
 	r.llmTokens.WithLabelValues("output").Add(float64(u.OutputTokens))
 	r.llmCost.Add(costUSD)
 	r.llmLatency.Observe(d.Seconds())
+}
+
+func (r *Registry) ObserveReadRoute(target string) { r.readRoutes.WithLabelValues(target).Inc() }
+
+// ReplicaLagSource is implemented by store.Store.
+type ReplicaLagSource interface {
+	ReplicaLag(ctx context.Context) (bytes, seconds float64, ok bool, err error)
+}
+
+// RegisterReplicaLag exports replica lag, read at scrape time.
+func (r *Registry) RegisterReplicaLag(src ReplicaLagSource) {
+	r.reg.MustRegister(&replicaLagCollector{src: src})
+}
+
+var (
+	replicaBytesDesc   = prometheus.NewDesc("networkai_replica_lag_bytes", "WAL the read replica has not replayed yet.", nil, nil)
+	replicaSecondsDesc = prometheus.NewDesc("networkai_replica_lag_seconds",
+		"Seconds since the replica replayed its last transaction (grows while idle, too).", nil, nil)
+)
+
+type replicaLagCollector struct{ src ReplicaLagSource }
+
+func (c *replicaLagCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- replicaBytesDesc
+	ch <- replicaSecondsDesc
+}
+
+func (c *replicaLagCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	b, sec, ok, err := c.src.ReplicaLag(ctx)
+	if !ok || err != nil {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(replicaBytesDesc, prometheus.GaugeValue, b)
+	ch <- prometheus.MustNewConstMetric(replicaSecondsDesc, prometheus.GaugeValue, sec)
 }
 
 func (r *Registry) ObserveConsumer(group, result string, lag time.Duration) {
