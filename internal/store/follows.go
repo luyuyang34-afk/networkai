@@ -69,7 +69,7 @@ func (s *Store) Unfollow(ctx context.Context, followerID int64, followee string)
 
 func (s *Store) GetProfile(ctx context.Context, username string, viewerID int64) (Profile, error) {
 	var p Profile
-	err := s.pool.QueryRow(ctx, `
+	err := s.reader(ctx).QueryRow(ctx, `
 		SELECT u.id, u.username, u.follower_count,
 		       (SELECT count(*) FROM follows f WHERE f.follower_id = u.id),
 		       EXISTS (SELECT 1 FROM follows f WHERE f.follower_id = $2 AND f.followee_id = u.id)
@@ -131,7 +131,7 @@ func (s *Store) RecentPostsByAuthors(ctx context.Context, authorIDs []int64, bef
 	if len(authorIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.reader(ctx).Query(ctx, `
 		SELECT id, created_at FROM posts
 		WHERE author_id = ANY($1) AND deleted_at IS NULL AND created_at < $2
 		ORDER BY created_at DESC, id DESC LIMIT $3`, authorIDs, before, limit)
@@ -151,7 +151,7 @@ func (s *Store) GetPostsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UU
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+postColumns+` FROM posts p JOIN users u ON u.id = p.author_id
+	rows, err := s.reader(ctx).Query(ctx, `SELECT `+postColumns+` FROM posts p JOIN users u ON u.id = p.author_id
 		WHERE p.id = ANY($1) AND p.deleted_at IS NULL`, ids)
 	if err != nil {
 		return nil, err

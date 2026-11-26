@@ -51,7 +51,10 @@ type Post struct {
 }
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool // primary: all writes, and reads that must be fresh
+	replica *pgxpool.Pool // optional streaming replica (see routing.go)
+	onRoute func(string)
+	lsnCache
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -173,7 +176,7 @@ func (s *Store) mutateOwnedPost(ctx context.Context, id uuid.UUID, authorID int6
 
 // GetPost returns a live (not deleted) post.
 func (s *Store) GetPost(ctx context.Context, id uuid.UUID) (Post, error) {
-	return scanPost(s.pool.QueryRow(ctx,
+	return scanPost(s.reader(ctx).QueryRow(ctx,
 		`SELECT `+postColumns+` FROM posts p JOIN users u ON u.id = p.author_id
 		 WHERE p.id = $1 AND p.deleted_at IS NULL`, id))
 }
@@ -216,7 +219,7 @@ func (s *Store) ListPosts(ctx context.Context, lp ListParams) ([]Post, *PageCurs
 	args = append(args, lp.Limit+1)
 	q += fmt.Sprintf(" ORDER BY p.created_at DESC, p.id DESC LIMIT $%d", len(args))
 
-	rows, err := s.pool.Query(ctx, q, args...)
+	rows, err := s.reader(ctx).Query(ctx, q, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -317,7 +320,7 @@ func (s *Store) LikeInfo(ctx context.Context, postIDs []string, userID int64) (m
 	if err != nil || userID == 0 {
 		return counts, map[string]bool{}, err
 	}
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.reader(ctx).Query(ctx,
 		`SELECT post_id::text FROM likes WHERE user_id = $1 AND post_id = ANY($2::uuid[])`, userID, postIDs)
 	if err != nil {
 		return nil, nil, err
@@ -338,7 +341,7 @@ func (s *Store) LikeCounts(ctx context.Context, postIDs []string) (map[string]in
 	if len(postIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.reader(ctx).Query(ctx,
 		`SELECT post_id::text, count(*) FROM likes WHERE post_id = ANY($1::uuid[]) GROUP BY post_id`, postIDs)
 	if err != nil {
 		return nil, err

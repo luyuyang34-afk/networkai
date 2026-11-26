@@ -277,7 +277,10 @@ func (s *Service) Read(ctx context.Context, userID int64, before time.Time, limi
 // rebuild fills a missing timeline from PostgreSQL with the most recent posts
 // of pushed (non-celebrity) followees.
 func (s *Service) rebuild(ctx context.Context, userID int64, pushed []int64) error {
-	entries, err := s.Store.RecentPostsByAuthors(ctx, pushed, time.Now().Add(time.Second), int(s.cap()))
+	// Fill the cache from the primary, never a replica: a post committed but
+	// not yet replayed would be missing, and its fan-out already skipped this
+	// (then nonexistent) timeline, so the cache would stay wrong for days.
+	entries, err := s.Store.RecentPostsByAuthors(store.ForcePrimary(ctx), pushed, time.Now().Add(time.Second), int(s.cap()))
 	if err != nil {
 		return err
 	}
