@@ -5,6 +5,7 @@
 # consumer-search    -> group search-indexer  (Elasticsearch)
 # consumer-timeline  -> group timeline-fanout (Redis home timelines)
 # consumer-stats     -> group post-stats      (replays history from the log)
+# consumer-cache     -> group cache-invalidation (post cache, ADR 0008)
 #
 # The previous polling worker is kept for comparison:
 #   docker compose --profile poll up -d indexer   (stop the relay first)
@@ -17,6 +18,7 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   KAFKA_BROKERS: redpanda:9092
   CELEBRITY_THRESHOLD: ${CELEBRITY_THRESHOLD:-10000}
+  POST_CACHE: ${POST_CACHE:-protected}
   JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-do-not-use-in-prod}
   MEDIA_BACKEND: local
   MEDIA_BASE_URL: http://localhost:8080/media
@@ -137,6 +139,10 @@ services:
   consumer-stats:
     <<: *worker
     command: ["consume", "post-stats"]
+
+  consumer-cache:
+    <<: *worker
+    command: ["consume", "cache-invalidation"]
 
   # The pre-CDC polling worker (indexing + fan-out in one loop), for
   # comparison experiments only.

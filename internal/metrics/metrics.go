@@ -45,6 +45,7 @@ type Registry struct {
 
 	fanoutFollowers prometheus.Histogram
 	fanoutDuration  prometheus.Histogram
+	postCache       *prometheus.CounterVec
 
 	llmRequests *prometheus.CounterVec
 	llmTokens   *prometheus.CounterVec
@@ -112,6 +113,10 @@ func New() *Registry {
 			Help:    "Time to push one post to all followers' timelines.",
 			Buckets: []float64{.001, .005, .01, .05, .1, .5, 1, 5, 15, 60},
 		}),
+		postCache: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "networkai_post_cache_total",
+			Help: "Post cache outcomes (hit, miss, early_refresh, lease_wait_hit, lease_wait_timeout, fill_dropped, redis_error).",
+		}, []string{"result"}),
 		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "networkai_llm_requests_total",
 			Help: "Writing-assistant LLM requests by outcome (ok, error, rate_limited).",
@@ -135,7 +140,7 @@ func New() *Registry {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.httpRequests, r.httpDuration, r.outboxEvents, r.outboxHandle, r.outboxPaused, r.searchRequests,
 		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency, r.fanoutFollowers, r.fanoutDuration,
-		r.consumerEvents, r.consumerLag, r.relayEvents, r.relayDelay, r.readRoutes,
+		r.consumerEvents, r.consumerLag, r.relayEvents, r.relayDelay, r.readRoutes, r.postCache,
 	)
 	return r
 }
@@ -218,6 +223,8 @@ func (r *Registry) ObserveFanout(followers int, d time.Duration) {
 	r.fanoutFollowers.Observe(float64(followers))
 	r.fanoutDuration.Observe(d.Seconds())
 }
+
+func (r *Registry) ObservePostCache(result string) { r.postCache.WithLabelValues(result).Inc() }
 
 func (r *Registry) ObserveSearch(outcome string) { r.searchRequests.WithLabelValues(outcome).Inc() }
 

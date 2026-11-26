@@ -12,12 +12,15 @@ import (
 	"networkai/internal/indexer"
 	"networkai/internal/metrics"
 	"networkai/internal/outbox"
+	"networkai/internal/postcache"
 	"networkai/internal/search"
 	"networkai/internal/stats"
 	"networkai/internal/store"
 	"networkai/internal/timeline"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -91,8 +94,29 @@ func runConsumer(ctx context.Context, cfg config.Config, group string, st *store
 		// A team that joined later: starts from the beginning of the log.
 		handle = (&stats.Consumer{Pool: pool}).Handle
 		fromStart = true
+	case "cache-invalidation":
+		// Second invalidation path for the post cache (ADR 0008): the API
+		// deletes the key after a write, but if it dies between commit and
+		// DEL, this group still invalidates from the log. Duplicates are
+		// harmless.
+		ro, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			return fmt.Errorf("cache-invalidation needs REDIS_URL: %w", err)
+		}
+		pc := &postcache.Cache{Redis: redis.NewClient(ro)}
+		handle = func(ctx context.Context, ev outbox.Event) error {
+			id, err := uuid.Parse(ev.AggregateID)
+			if err != nil || ev.AggregateType != store.AggregatePost {
+				return nil // not a post event; nothing cached under it
+			}
+			if err := pc.Invalidate(ctx, id); err != nil {
+				return fmt.Errorf("%w: %v", timeline.ErrUnavailable, err)
+			}
+			return nil
+		}
+		unavailable = func(err error) bool { return errors.Is(err, timeline.ErrUnavailable) }
 	default:
-		return fmt.Errorf("unknown consumer group %q (search-indexer | timeline-fanout | post-stats)", group)
+		return fmt.Errorf("unknown consumer group %q (search-indexer | timeline-fanout | post-stats | cache-invalidation)", group)
 	}
 	c := &cdc.Consumer{Brokers: cfg.KafkaBrokers, Group: group, Handle: handle, IsUnavailable: unavailable,
 		FromStart: fromStart, Log: log, OnEvent: m.ObserveConsumer}

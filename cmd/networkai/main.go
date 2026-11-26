@@ -36,10 +36,12 @@ import (
 	"networkai/internal/media"
 	"networkai/internal/metrics"
 	"networkai/internal/outbox"
+	"networkai/internal/postcache"
 	"networkai/internal/search"
 	"networkai/internal/store"
 	"networkai/internal/timeline"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -176,7 +178,7 @@ func runAPI(ctx context.Context, cfg config.Config, st *store.Store, pool *pgxpo
 	}
 
 	handler := httpapi.New(httpapi.Deps{
-		Users: st, Posts: st, Search: es, Media: ms,
+		Users: st, Posts: openPostCache(cfg, st, m, log), Search: es, Media: ms,
 		Ready:          readiness{Store: st, pool: pool},
 		Tokens:         auth.NewTokens(cfg.JWTSecret, cfg.JWTTTL),
 		Log:            log,
@@ -318,6 +320,65 @@ func openTimelines(cfg config.Config, st *store.Store, m *metrics.Registry, log 
 		svc.OnFanout = m.ObserveFanout
 	}
 	return svc
+}
+
+// openPostCache wraps the post store with the Redis hot-key cache (ADR 0008).
+func openPostCache(cfg config.Config, st *store.Store, m *metrics.Registry, log *slog.Logger) httpapi.PostStore {
+	var opt postcache.Options
+	switch cfg.PostCache {
+	case "off":
+		return st
+	case "naive":
+	case "singleflight":
+		opt = postcache.Options{Singleflight: true}
+	case "protected":
+		opt = postcache.Protected
+	default:
+		log.Warn("unknown POST_CACHE; using protected", "value", cfg.PostCache)
+		opt = postcache.Protected
+	}
+	ro, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Warn("invalid REDIS_URL; post cache disabled", "err", err)
+		return st
+	}
+	c := &postcache.Cache{Redis: redis.NewClient(ro), Store: st, Opt: opt, OnResult: m.ObservePostCache}
+	log.Info("post cache enabled", "mode", cfg.PostCache)
+	return cachedPosts{Store: st, cache: c, log: log}
+}
+
+// cachedPosts serves GetPost from the cache and invalidates it after edits
+// and deletes commit. Other methods go straight to the store.
+type cachedPosts struct {
+	*store.Store
+	cache *postcache.Cache
+	log   *slog.Logger
+}
+
+func (c cachedPosts) GetPost(ctx context.Context, id uuid.UUID) (store.Post, error) {
+	return c.cache.GetPost(ctx, id)
+}
+
+func (c cachedPosts) UpdatePostMessage(ctx context.Context, id uuid.UUID, authorID int64, msg string) (store.Post, error) {
+	p, err := c.Store.UpdatePostMessage(ctx, id, authorID, msg)
+	c.invalidate(ctx, id, err)
+	return p, err
+}
+
+func (c cachedPosts) DeletePost(ctx context.Context, id uuid.UUID, authorID int64) (store.Post, error) {
+	p, err := c.Store.DeletePost(ctx, id, authorID)
+	c.invalidate(ctx, id, err)
+	return p, err
+}
+
+func (c cachedPosts) invalidate(ctx context.Context, id uuid.UUID, err error) {
+	if err != nil {
+		return
+	}
+	// A failed invalidation leaves the old version until the TTL (60s).
+	if ierr := c.cache.Invalidate(ctx, id); ierr != nil {
+		c.log.Warn("post cache invalidation failed; stale until TTL", "post", id, "err", ierr)
+	}
 }
 
 func openMedia(ctx context.Context, cfg config.Config) (media.Store, string, error) {

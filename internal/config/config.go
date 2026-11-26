@@ -62,6 +62,9 @@ type Config struct {
 	KafkaBrokers       []string
 	CelebrityThreshold int64
 	TimelineCap        int64
+	// PostCache: off | naive | singleflight | protected (default). Selects
+	// the hot-key protections of the GET /posts/{id} cache (ADR 0008).
+	PostCache string
 
 	IndexerBatchSize   int
 	IndexerPoll        time.Duration
@@ -103,6 +106,10 @@ func Load() (Config, error) {
 	c.CelebrityThreshold = int64(intEnv("CELEBRITY_THRESHOLD", 10000, &errs))
 	c.TimelineCap = int64(intEnv("TIMELINE_CAP", 800, &errs))
 	c.FeedLexical = os.Getenv("FEED_LEXICAL") == "true"
+	c.PostCache = os.Getenv("POST_CACHE")
+	if c.PostCache == "" {
+		c.PostCache = "protected"
+	}
 	c.LLMPerUserPerMinute = intEnv("LLM_PER_USER_PER_MINUTE", 20, &errs)
 	c.LLMPriceInPerM = floatEnv("LLM_PRICE_IN_PER_M", &errs)
 	c.LLMPriceOutPerM = floatEnv("LLM_PRICE_OUT_PER_M", &errs)
