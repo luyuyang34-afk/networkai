@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"networkai/internal/db"
@@ -90,4 +91,14 @@ func Redis(t testing.TB) (*redis.Client, string) {
 	c := redis.NewClient(opt)
 	t.Cleanup(func() { c.Close() })
 	return c, fmt.Sprintf("test%d:", rand.Uint64())
+}
+
+// Kafka returns TEST_KAFKA_BROKERS and a unique topic name, or skips.
+func Kafka(t testing.TB) ([]string, string) {
+	t.Helper()
+	b := os.Getenv("TEST_KAFKA_BROKERS")
+	if b == "" {
+		t.Skip("TEST_KAFKA_BROKERS not set; skipping Kafka integration test")
+	}
+	return strings.Split(b, ","), fmt.Sprintf("test-events-%d", rand.Uint64())
 }
