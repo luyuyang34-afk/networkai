@@ -12,6 +12,7 @@
 # The secrets below are for local development only.
 x-app-env: &app-env
   DATABASE_URL: postgres://networkai:networkai@postgres:5432/networkai?sslmode=disable
+  REPLICA_DATABASE_URL: postgres://networkai:networkai@postgres-replica:5432/networkai?sslmode=disable
   ES_URL: http://elasticsearch:9200
   REDIS_URL: redis://redis:6379/0
   KAFKA_BROKERS: redpanda:9092
@@ -35,17 +36,43 @@ services:
   postgres:
     image: postgres:16-alpine
     # Logical decoding for CDC (the relay reads the WAL through a slot).
-    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10",
+              "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
     environment:
       POSTGRES_USER: networkai
       POSTGRES_PASSWORD: networkai
       POSTGRES_DB: networkai
     ports: ["5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U networkai"]
       interval: 2s
       retries: 30
+
+  # Streaming read replica (cloned from the primary on first start). Set
+  # REPLICA_APPLY_DELAY=2s to make replication lag visible on purpose.
+  postgres-replica:
+    image: postgres:16-alpine
+    entrypoint: ["/replica-entrypoint.sh"]
+    command: ["-c", "max_wal_senders=10", "-c", "max_replication_slots=10"]
+    environment:
+      POSTGRES_USER: networkai
+      POSTGRES_PASSWORD: networkai
+      PRIMARY_HOST: postgres
+      REPLICA_APPLY_DELAY: ${REPLICA_APPLY_DELAY:-0}
+    ports: ["5433:5432"]
+    volumes:
+      - pgreplica:/var/lib/postgresql/data
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./deploy/postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 2s
+      retries: 60
 
   elasticsearch:
     image: elasticsearch:8.15.3
@@ -93,6 +120,7 @@ services:
     # must keep accepting writes while any of them is down (ADR 0001).
     depends_on:
       postgres: {condition: service_healthy}
+      postgres-replica: {condition: service_healthy}
 
   relay:
     <<: *worker
@@ -132,6 +160,7 @@ services:
 
 volumes:
   pgdata:
+  pgreplica:
   esdata:
   rpdata:
   media:

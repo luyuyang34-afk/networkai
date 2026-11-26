@@ -39,6 +39,7 @@ jobs:
       TEST_ES_URL: http://localhost:9200
       TEST_REDIS_URL: redis://localhost:6379/0
       TEST_KAFKA_BROKERS: localhost:9092
+      TEST_REPLICA_URL: postgres://networkai:networkai@localhost:5433/networkai?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       # Service containers cannot take a command, so CDC prerequisites are
@@ -46,6 +47,7 @@ jobs:
       - name: enable logical replication and start redpanda
         run: |
           docker exec ${{ job.services.postgres.id }} psql -U networkai -c "ALTER SYSTEM SET wal_level = logical"
+          docker exec ${{ job.services.postgres.id }} sh -c 'echo "host replication all all scram-sha-256" >> "$PGDATA/pg_hba.conf"'
           docker restart ${{ job.services.postgres.id }}
           docker run -d --name redpanda -p 9092:9092 redpandadata/redpanda:v24.2.7 redpanda start \
             --mode dev-container --smp 1 --memory 1G --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr localhost:9092
@@ -55,6 +57,16 @@ jobs:
             sleep 2
           done
           docker exec ${{ job.services.postgres.id }} psql -U networkai -Atc "show wal_level"
+          # A read replica that applies WAL 2 s late, so tests can reproduce
+          # replication-lag bugs deterministically.
+          docker run -d --name replica --network ${{ job.services.postgres.network }} -p 5433:5432 \
+            -e POSTGRES_USER=networkai -e POSTGRES_PASSWORD=networkai -e PRIMARY_HOST=postgres \
+            -e REPLICA_APPLY_DELAY=2s \
+            -v $PWD/deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro \
+            -v $PWD/deploy/postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro \
+            --entrypoint /replica-entrypoint.sh postgres:16-alpine
+          for i in $(seq 1 60); do docker exec replica pg_isready -U networkai >/dev/null 2>&1 && break; sleep 2; done
+          docker exec replica psql -U networkai -Atc "select pg_is_in_recovery()"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

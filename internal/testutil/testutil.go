@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"networkai/internal/db"
 
@@ -101,4 +102,37 @@ func Kafka(t testing.TB) ([]string, string) {
 		t.Skip("TEST_KAFKA_BROKERS not set; skipping Kafka integration test")
 	}
 	return strings.Split(b, ","), fmt.Sprintf("test-events-%d", rand.Uint64())
+}
+
+// Replica returns a pool on the read replica for the same database as
+// primary (physical replication copies new databases too), or skips. It
+// waits until the database has been replayed on the replica.
+func Replica(t testing.TB, primary *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	ru := os.Getenv("TEST_REPLICA_URL")
+	if ru == "" {
+		t.Skip("TEST_REPLICA_URL not set; skipping read-replica test")
+	}
+	u, err := url.Parse(ru)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + primary.Config().ConnConfig.Database
+	ctx := context.Background()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		pool, err := db.Connect(ctx, u.String())
+		if err == nil {
+			var n int
+			if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&n); err == nil && n > 0 {
+				t.Cleanup(pool.Close)
+				return pool
+			}
+			pool.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("database never appeared on the replica: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
