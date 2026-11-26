@@ -13,6 +13,7 @@ require (
 	github.com/twmb/franz-go v1.22.3
 	github.com/twmb/franz-go/pkg/kadm v1.20.0
 	golang.org/x/crypto v0.59.0
+	golang.org/x/sync v0.25.0
 	google.golang.org/api v0.312.0
 )
 
@@ -64,7 +65,6 @@ require (
 	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect
-	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
