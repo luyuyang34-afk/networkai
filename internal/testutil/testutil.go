@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // NewDB creates a fresh, migrated database and drops it when the test ends,
@@ -73,4 +74,20 @@ func ESURL(t testing.TB) string {
 		t.Skip("TEST_ES_URL not set; skipping Elasticsearch integration test")
 	}
 	return u
+}
+
+// Redis returns a client for TEST_REDIS_URL and a random key prefix, or skips.
+func Redis(t testing.TB) (*redis.Client, string) {
+	t.Helper()
+	u := os.Getenv("TEST_REDIS_URL")
+	if u == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
+	}
+	opt, err := redis.ParseURL(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := redis.NewClient(opt)
+	t.Cleanup(func() { c.Close() })
+	return c, fmt.Sprintf("test%d:", rand.Uint64())
 }
