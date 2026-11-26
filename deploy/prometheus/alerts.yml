@@ -5,13 +5,36 @@ groups:
       # Search is falling behind the database. Fires during an Elasticsearch
       # outage, a stalled or crashed indexer, or a write spike the indexer
       # cannot keep up with. Posting and browsing still work while this fires.
+      # Poll mode: oldest unprocessed outbox row. CDC mode: end-to-end lag of
+      # the search-indexer consumer group.
       - alert: SearchIndexLagging
-        expr: max(networkai_outbox_oldest_pending_seconds) > 120
+        expr: |
+          max(networkai_outbox_oldest_pending_seconds) > 120
+            or max(networkai_consumer_lag_seconds{group="search-indexer"}) > 120
         for: 2m
         labels: {severity: page}
         annotations:
           summary: "Search is {{ $value | humanizeDuration }} behind PostgreSQL"
           runbook: "Check networkai_outbox_paused and Elasticsearch health; see docs/runbook.md"
+
+      # Any consumer group falling behind (timeline fan-out, stats, ...).
+      # Each group lags independently; this names which one.
+      - alert: ConsumerGroupLagging
+        expr: max by (group) (networkai_consumer_lag_seconds) > 300
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Consumer group {{ $labels.group }} is {{ $value | humanizeDuration }} behind"
+
+      # The relay confirms WAL positions as it publishes. If it stops,
+      # PostgreSQL keeps all WAL for the slot and the disk eventually fills,
+      # taking the primary database down. Page before that happens.
+      - alert: ReplicationSlotWALBacklog
+        expr: max(networkai_replication_slot_lag_bytes) > 1e9
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "CDC slot is retaining {{ $value | humanize1024 }}B of WAL: is the relay running?"
 
       # Events that exhausted their retries need a human: they will never be
       # indexed on their own. `networkai reindex` repairs the index.

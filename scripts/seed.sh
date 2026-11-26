@@ -20,8 +20,7 @@ for m in "Running my first half marathon this spring" \
 done
 
 bold "Seeded 7 posts. Waiting for the indexer..."
-until [ "$(pending)" = "0" ]; do sleep 0.5; done
-sleep 1.2 # Elasticsearch refresh interval
+searchable "q=runs" 2
 
 bold "Search 'runs' (stemming matches 'run' and 'Running'):"
 curl -s "$API/posts/search?q=runs" | jq -r '.items[] | "  \(.author): \(.message)"'

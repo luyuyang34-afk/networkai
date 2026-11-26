@@ -2,6 +2,7 @@
 TEST_DATABASE_URL ?= postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable
 TEST_ES_URL       ?= http://localhost:9200
 TEST_REDIS_URL    ?= redis://localhost:6379/0
+TEST_KAFKA_BROKERS ?= localhost:19092
 
 .PHONY: help up down logs lint test test-integration seed demo-outage reindex \
 	synth train load-synth rebuild loadtest web-test
@@ -27,8 +28,9 @@ test: ## Unit tests (integration tests skip without databases)
 	go test -race ./...
 
 test-integration: ## All tests against PostgreSQL + Elasticsearch from docker compose
-	docker compose up -d --wait postgres elasticsearch redis
+	docker compose up -d --wait postgres elasticsearch redis redpanda
 	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_ES_URL='$(TEST_ES_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+		TEST_KAFKA_BROKERS='$(TEST_KAFKA_BROKERS)' \
 		go test -race -count=1 ./...
 
 seed: ## Create demo users and posts

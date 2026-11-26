@@ -36,6 +36,11 @@ type Registry struct {
 	outboxPaused   prometheus.Gauge
 	searchRequests *prometheus.CounterVec
 
+	consumerEvents *prometheus.CounterVec
+	consumerLag    *prometheus.GaugeVec
+	relayEvents    prometheus.Counter
+	relayDelay     prometheus.Histogram
+
 	fanoutFollowers prometheus.Histogram
 	fanoutDuration  prometheus.Histogram
 
@@ -74,6 +79,23 @@ func New() *Registry {
 			Name: "networkai_search_requests_total",
 			Help: "Search requests by outcome (ok, unavailable, error).",
 		}, []string{"outcome"}),
+		consumerEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "networkai_consumer_events_total",
+			Help: "Events handled per consumer group, by result (ok, retry, paused, dead).",
+		}, []string{"group", "result"}),
+		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "networkai_consumer_lag_seconds",
+			Help: "End-to-end lag of the latest event a group touched (outbox insert -> handled).",
+		}, []string{"group"}),
+		relayEvents: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "networkai_relay_events_total",
+			Help: "Outbox events published from the WAL to the broker.",
+		}),
+		relayDelay: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "networkai_relay_delay_seconds",
+			Help:    "Commit to broker-acknowledged delay per transaction.",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 5},
+		}),
 		fanoutFollowers: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "networkai_timeline_fanout_followers",
 			Help:    "Followers written to per pushed post (fan-out on write).",
@@ -107,6 +129,7 @@ func New() *Registry {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		r.httpRequests, r.httpDuration, r.outboxEvents, r.outboxHandle, r.outboxPaused, r.searchRequests,
 		r.llmRequests, r.llmTokens, r.llmCost, r.llmLatency, r.fanoutFollowers, r.fanoutDuration,
+		r.consumerEvents, r.consumerLag, r.relayEvents, r.relayDelay,
 	)
 	return r
 }
@@ -135,6 +158,18 @@ func (r *Registry) ObserveLLM(_ string, outcome string, u assist.Usage, costUSD 
 	r.llmTokens.WithLabelValues("output").Add(float64(u.OutputTokens))
 	r.llmCost.Add(costUSD)
 	r.llmLatency.Observe(d.Seconds())
+}
+
+func (r *Registry) ObserveConsumer(group, result string, lag time.Duration) {
+	r.consumerEvents.WithLabelValues(group, result).Inc()
+	if lag > 0 {
+		r.consumerLag.WithLabelValues(group).Set(lag.Seconds())
+	}
+}
+
+func (r *Registry) ObserveRelay(n int, delay time.Duration) {
+	r.relayEvents.Add(float64(n))
+	r.relayDelay.Observe(delay.Seconds())
 }
 
 func (r *Registry) ObserveFanout(followers int, d time.Duration) {
@@ -171,6 +206,8 @@ var (
 	pendingDesc = prometheus.NewDesc("networkai_outbox_pending", "Outbox events waiting to be indexed.", nil, nil)
 	deadDesc    = prometheus.NewDesc("networkai_outbox_dead", "Outbox events that exhausted their retries.", nil, nil)
 	oldestDesc  = prometheus.NewDesc("networkai_outbox_oldest_pending_seconds", "Age of the oldest pending outbox event.", nil, nil)
+	slotLagDesc = prometheus.NewDesc("networkai_replication_slot_lag_bytes",
+		"WAL retained by the CDC replication slot. Grows without bound if the relay stops; alert on it.", nil, nil)
 )
 
 type backlogCollector struct{ pool *pgxpool.Pool }
@@ -179,6 +216,7 @@ func (c *backlogCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pendingDesc
 	ch <- deadDesc
 	ch <- oldestDesc
+	ch <- slotLagDesc
 }
 
 func (c *backlogCollector) Collect(ch chan<- prometheus.Metric) {
@@ -200,4 +238,9 @@ func (c *backlogCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(pendingDesc, prometheus.GaugeValue, float64(pending))
 	ch <- prometheus.MustNewConstMetric(deadDesc, prometheus.GaugeValue, float64(dead))
 	ch <- prometheus.MustNewConstMetric(oldestDesc, prometheus.GaugeValue, oldest)
+	var slotLag float64
+	if err := c.pool.QueryRow(ctx, `SELECT COALESCE(max(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)), 0)::float8
+		FROM pg_replication_slots`).Scan(&slotLag); err == nil {
+		ch <- prometheus.MustNewConstMetric(slotLagDesc, prometheus.GaugeValue, slotLag)
+	}
 }

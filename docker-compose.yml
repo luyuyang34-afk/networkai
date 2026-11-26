@@ -1,13 +1,20 @@
 # One command to run everything locally:  docker compose up --build
 #
-# api      -> http://localhost:8080
-# indexer  -> outbox worker (PostgreSQL -> Elasticsearch)
+# api                -> http://localhost:8080
+# relay              -> CDC: PostgreSQL WAL -> Kafka topic post-events
+# consumer-search    -> group search-indexer  (Elasticsearch)
+# consumer-timeline  -> group timeline-fanout (Redis home timelines)
+# consumer-stats     -> group post-stats      (replays history from the log)
+#
+# The previous polling worker is kept for comparison:
+#   docker compose --profile poll up -d indexer   (stop the relay first)
 #
 # The secrets below are for local development only.
 x-app-env: &app-env
   DATABASE_URL: postgres://networkai:networkai@postgres:5432/networkai?sslmode=disable
   ES_URL: http://elasticsearch:9200
   REDIS_URL: redis://redis:6379/0
+  KAFKA_BROKERS: redpanda:9092
   CELEBRITY_THRESHOLD: ${CELEBRITY_THRESHOLD:-10000}
   JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-do-not-use-in-prod}
   MEDIA_BACKEND: local
@@ -15,9 +22,20 @@ x-app-env: &app-env
   CORS_ORIGINS: http://localhost:3000
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
+x-worker: &worker
+  build: .
+  environment: *app-env
+  restart: unless-stopped
+  depends_on:
+    postgres: {condition: service_healthy}
+    redpanda: {condition: service_healthy}
+    api: {condition: service_started} # api applies migrations on start
+
 services:
   postgres:
     image: postgres:16-alpine
+    # Logical decoding for CDC (the relay reads the WAL through a slot).
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
     environment:
       POSTGRES_USER: networkai
       POSTGRES_PASSWORD: networkai
@@ -52,24 +70,56 @@ services:
       interval: 2s
       retries: 30
 
+  # Kafka-API-compatible broker (single node, development settings).
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command: ["redpanda", "start", "--mode", "dev-container", "--smp", "1", "--memory", "1G",
+              "--kafka-addr", "internal://0.0.0.0:9092,external://0.0.0.0:19092",
+              "--advertise-kafka-addr", "internal://redpanda:9092,external://localhost:19092"]
+    ports: ["19092:19092"]
+    volumes: [rpdata:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      retries: 40
+
   api:
     build: .
     command: ["api"]
     environment: *app-env
     ports: ["8080:8080"]
     volumes: [media:/data/media]
-    # Deliberately NOT depending on elasticsearch: the API must keep
-    # accepting writes while search is down (see docs/adr/0001).
+    # Deliberately NOT depending on elasticsearch, redis or redpanda: the API
+    # must keep accepting writes while any of them is down (ADR 0001).
     depends_on:
       postgres: {condition: service_healthy}
 
+  relay:
+    <<: *worker
+    command: ["relay"]
+
+  consumer-search:
+    <<: *worker
+    command: ["consume", "search-indexer"]
+
+  consumer-timeline:
+    <<: *worker
+    command: ["consume", "timeline-fanout"]
+
+  consumer-stats:
+    <<: *worker
+    command: ["consume", "post-stats"]
+
+  # The pre-CDC polling worker (indexing + fan-out in one loop), for
+  # comparison experiments only.
   indexer:
     build: .
     command: ["indexer"]
     environment: *app-env
+    profiles: [poll]
     depends_on:
       postgres: {condition: service_healthy}
-      api: {condition: service_started} # api applies migrations on start
+      api: {condition: service_started}
 
   # Optional: docker compose --profile observability up -d
   # Prometheus UI at http://localhost:9090 (Alerts tab shows rule state).
@@ -83,4 +133,5 @@ services:
 volumes:
   pgdata:
   esdata:
+  rpdata:
   media:

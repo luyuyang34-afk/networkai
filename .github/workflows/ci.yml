@@ -38,8 +38,23 @@ jobs:
       TEST_DATABASE_URL: postgres://networkai:networkai@localhost:5432/networkai?sslmode=disable
       TEST_ES_URL: http://localhost:9200
       TEST_REDIS_URL: redis://localhost:6379/0
+      TEST_KAFKA_BROKERS: localhost:9092
     steps:
       - uses: actions/checkout@v4
+      # Service containers cannot take a command, so CDC prerequisites are
+      # set up here: logical WAL for PostgreSQL, and a Redpanda broker.
+      - name: enable logical replication and start redpanda
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U networkai -c "ALTER SYSTEM SET wal_level = logical"
+          docker restart ${{ job.services.postgres.id }}
+          docker run -d --name redpanda -p 9092:9092 redpandadata/redpanda:v24.2.7 redpanda start \
+            --mode dev-container --smp 1 --memory 1G --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr localhost:9092
+          for i in $(seq 1 60); do
+            docker exec ${{ job.services.postgres.id }} pg_isready -U networkai >/dev/null 2>&1 \
+              && docker exec redpanda rpk cluster health 2>/dev/null | grep -q 'Healthy:.*true' && break
+            sleep 2
+          done
+          docker exec ${{ job.services.postgres.id }} psql -U networkai -Atc "show wal_level"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

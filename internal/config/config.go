@@ -56,6 +56,7 @@ type Config struct {
 	// Home timeline (Redis). CelebrityThreshold: authors with at least this
 	// many followers are pulled at read time instead of pushed on write.
 	RedisURL           string
+	KafkaBrokers       []string
 	CelebrityThreshold int64
 	TimelineCap        int64
 
@@ -80,6 +81,7 @@ func Load() (Config, error) {
 		CORSOrigins:        splitList(env("CORS_ORIGINS", "http://localhost:3000")),
 		ModelDir:           env("MODEL_DIR", "./models"),
 		RedisURL:           env("REDIS_URL", "redis://localhost:6379/0"),
+		KafkaBrokers:       splitList(env("KAFKA_BROKERS", "localhost:9092")),
 		LLMBaseURL:         env("LLM_BASE_URL", "https://api.openai.com/v1"),
 		LLMAPIKey:          os.Getenv("OPENAI_API_KEY"),
 		LLMModel:           env("LLM_MODEL", "gpt-4o-mini"),

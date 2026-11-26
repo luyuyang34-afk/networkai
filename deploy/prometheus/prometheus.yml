@@ -10,5 +10,8 @@ rule_files:
 scrape_configs:
   - job_name: api
     static_configs: [{targets: ["api:8080"]}]
-  - job_name: indexer
+  - job_name: workers
+    static_configs:
+      - targets: ["relay:9091", "consumer-search:9091", "consumer-timeline:9091", "consumer-stats:9091"]
+  - job_name: indexer # poll mode only
     static_configs: [{targets: ["indexer:9091"]}]

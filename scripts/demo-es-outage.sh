@@ -21,16 +21,13 @@ curl -s "$API/posts?author=demo_user&limit=3" | jq -r '.items[] | "  \(.message)
 bold "4. Search degrades to a clean 503 instead of a crash:"
 curl -s "$API/posts/search?q=kayaking" | jq -c .
 
-bold "5. Outbox backlog (events waiting to be indexed):"
-curl -s "$API/readyz" | jq .outbox
+bold "5. Other jobs are unaffected: the outbox and the timeline/stats consumers keep going"
+curl -s "$API/readyz" | jq -c .outbox
 
 bold "6. Starting Elasticsearch again"
 docker compose start elasticsearch >/dev/null
-printf '  waiting for the backlog to drain'
-until [ "$(pending)" = "0" ]; do printf .; sleep 1; done
-sleep 1.2
-echo
+printf '  waiting for the search-indexer group to catch up...'
+searchable "q=kayaking&author=demo_user" 5 && echo " done"
 
 bold "7. All posts written during the outage are searchable:"
 curl -s "$API/posts/search?q=kayaking&author=demo_user" | jq -r '.items[] | "  \(.message)"'
-curl -s "$API/readyz" | jq .outbox

@@ -1,7 +1,10 @@
 // Command networkai runs the NetworkAI backend.
 //
 //	networkai api       HTTP API (applies migrations on start)
-//	networkai indexer   outbox worker: PostgreSQL -> Elasticsearch
+//	networkai indexer   outbox polling worker (OUTBOX_MODE=poll)
+//	networkai relay     CDC: PostgreSQL WAL -> Kafka topic post-events
+//	networkai consume <group>  one consumer group: search-indexer |
+//	                    timeline-fanout | post-stats
 //	networkai migrate   apply database migrations and exit
 //	networkai reindex [-fresh]  re-apply all posts to the index (in place,
 //	                            or blue/green into a new index + alias swap)
@@ -89,6 +92,16 @@ func run(ctx context.Context, cmd string, log *slog.Logger) error {
 		return runAPI(ctx, cfg, st, pool, es, log)
 	case "indexer":
 		return runIndexer(ctx, cfg, st, pool, es, log)
+	case "relay":
+		if err := db.Migrate(ctx, pool); err != nil {
+			return err
+		}
+		return runRelay(ctx, cfg, pool, log)
+	case "consume":
+		if len(os.Args) < 3 {
+			return errors.New("usage: networkai consume <search-indexer|timeline-fanout|post-stats>")
+		}
+		return runConsumer(ctx, cfg, os.Args[2], st, pool, es, log)
 	case "reindex":
 		fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
 		fresh := fs.Bool("fresh", false, "blue/green: build a new index, swap the alias, delete the old one")
