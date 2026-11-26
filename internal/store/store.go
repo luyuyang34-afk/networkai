@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,9 +56,38 @@ type Store struct {
 	replica *pgxpool.Pool // optional streaming replica (see routing.go)
 	onRoute func(string)
 	lsnCache
+	// likeShards: rows per post in post_like_counts (see bumpLikeCount).
+	likeShards int
 }
 
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+// DefaultLikeShards spreads one post's like counter over this many rows.
+const DefaultLikeShards = 16
+
+func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool, likeShards: DefaultLikeShards} }
+
+// WithLikeShards sets the counter layout: 0 = no counter (count the likes
+// rows on read), 1 = one counter row per post, N = N shard rows. Only for
+// comparisons; mixing layouts on one database is not supported.
+func (s *Store) WithLikeShards(n int) *Store {
+	s.likeShards = n
+	return s
+}
+
+// bumpLikeCount adds delta to a random shard of the post's like counter, in
+// the caller's transaction. With one row per post, every like of a viral
+// post queues on that row's lock; with N shards, concurrent likes rarely
+// pick the same row, and reads sum at most N rows instead of counting every
+// like.
+func (s *Store) bumpLikeCount(ctx context.Context, tx pgx.Tx, postID uuid.UUID, delta int) error {
+	if s.likeShards == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO post_like_counts (post_id, shard, n) VALUES ($1, $2, $3)
+		ON CONFLICT (post_id, shard) DO UPDATE SET n = post_like_counts.n + EXCLUDED.n`,
+		postID, rand.IntN(s.likeShards), delta)
+	return err
+}
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
@@ -287,14 +317,25 @@ func (s *Store) Now(ctx context.Context) (time.Time, error) {
 
 // Like records that userID likes a live post. Liking twice is a no-op.
 func (s *Store) Like(ctx context.Context, userID int64, postID uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO likes (user_id, post_id)
-		SELECT $1, id FROM posts WHERE id = $2 AND deleted_at IS NULL
-		ON CONFLICT DO NOTHING`, userID, postID)
+	var inserted bool
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO likes (user_id, post_id)
+			SELECT $1, id FROM posts WHERE id = $2 AND deleted_at IS NULL
+			ON CONFLICT DO NOTHING`, userID, postID)
+		if err != nil {
+			return err
+		}
+		inserted = tag.RowsAffected() == 1
+		if inserted {
+			return s.bumpLikeCount(ctx, tx, postID, +1)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if !inserted {
 		// Either already liked (fine) or the post does not exist.
 		var exists bool
 		if err := s.pool.QueryRow(ctx,
@@ -309,8 +350,13 @@ func (s *Store) Like(ctx context.Context, userID int64, postID uuid.UUID) error 
 }
 
 func (s *Store) Unlike(ctx context.Context, userID int64, postID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM likes WHERE user_id = $1 AND post_id = $2`, userID, postID)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		return s.bumpLikeCount(ctx, tx, postID, -1)
+	})
 }
 
 // LikeInfo returns like counts for postIDs and which of them userID liked
@@ -341,8 +387,11 @@ func (s *Store) LikeCounts(ctx context.Context, postIDs []string) (map[string]in
 	if len(postIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.reader(ctx).Query(ctx,
-		`SELECT post_id::text, count(*) FROM likes WHERE post_id = ANY($1::uuid[]) GROUP BY post_id`, postIDs)
+	q := `SELECT post_id::text, sum(n) FROM post_like_counts WHERE post_id = ANY($1::uuid[]) GROUP BY post_id`
+	if s.likeShards == 0 { // counting mode for comparisons: scan the likes rows
+		q = `SELECT post_id::text, count(*) FROM likes WHERE post_id = ANY($1::uuid[]) GROUP BY post_id`
+	}
+	rows, err := s.reader(ctx).Query(ctx, q, postIDs)
 	if err != nil {
 		return nil, err
 	}
