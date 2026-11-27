@@ -411,3 +411,41 @@ func TestRestartedGroupDoesNotSkipRecordsOnUncommittedPartitions(t *testing.T) {
 		t.Fatal("records produced while the group was down were skipped")
 	}
 }
+
+// Shutting down while a publish is in flight is a clean stop, not an
+// error: the batch was not confirmed, so the next run replays it. (This
+// surfaced as a rare CI failure, "relay: produce: context canceled".)
+func TestRelayStopsCleanlyDuringPublish(t *testing.T) {
+	e := setup(t)
+	// A broker that never answers: ProduceSync blocks until cancelled.
+	prod, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &cdc.Relay{ReplicationURL: e.pool.Config().ConnString(), Slot: e.slot, Topic: e.topic,
+		Pool: e.pool, Producer: prod, Log: quiet}
+	if err := r.EnsureSlot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.post("stuck in publish")
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	time.Sleep(time.Second) // the commit is decoded and the publish is blocked
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v on shutdown, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	// Not confirmed: a healthy relay still delivers the event.
+	stop := e.startRelay()
+	defer stop()
+	if got := e.readAll(1); len(got) != 1 {
+		t.Fatalf("got %d records after restart, want 1", len(got))
+	}
+}

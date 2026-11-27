@@ -60,7 +60,18 @@ type Relay struct {
 // Run streams until ctx is cancelled. Delivery is at-least-once: the WAL
 // position is confirmed to PostgreSQL only after the broker acknowledged
 // every event up to it, so a crash replays from the last confirmed commit.
+//
+// Cancellation is a clean shutdown wherever it lands, including mid-publish:
+// an interrupted batch was not confirmed, so the next run replays it.
 func (r *Relay) Run(ctx context.Context) error {
+	err := r.run(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+func (r *Relay) run(ctx context.Context) error {
 	conn, err := pgconn.Connect(ctx, withReplication(r.ReplicationURL))
 	if err != nil {
 		return fmt.Errorf("replication connect: %w", err)
