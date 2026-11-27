@@ -8,6 +8,36 @@
 
 ---
 
+## 考点总览
+
+先按领域看清楚会考什么，再去练下面的题。"重要度"是按后端或全栈岗位面试的出现频率估的：★★★ 必须讲透，★★ 要能讲清楚，★ 知道概念即可。
+
+| 领域 | 考点 | 重要度 | 对应题 | 去哪学 |
+|---|---|---|---|---|
+| **分布式数据一致性** | 双写问题；transactional outbox；CDC（WAL、逻辑复制槽）；至少一次 vs 恰好一次；幂等（版本号、去重表）；消息顺序（分区键）；offset 提交；死信队列 | ★★★ | 1–3, 18–20 | 01、02 篇，ADR 0001/0002/0006 |
+| **数据库** | B-tree 索引、复合索引、部分索引；keyset 分页；行锁（`FOR UPDATE` / `SKIP LOCKED`）；隔离级别（读已提交 vs 可重复读）；MVCC（xmin、死元组、VACUUM、ANALYZE）；查询计划与统计信息；单语句事务 | ★★★ | 4–6, 27, 35 | 01 篇，sharding-experiment |
+| **复制与一致性模型** | 主从流复制；复制延迟；读你所写、单调读；LSN；同步 vs 异步复制；RPO / RTO；脑裂；fencing 与租约；CAP | ★★★ | 21–22, 30 | 07 篇，ADR 0007/0010 |
+| **缓存** | cache-aside；失效 vs TTL；缓存击穿、雪崩、穿透（负缓存）；singleflight；租约（Facebook memcache）；XFetch 提前刷新；缓存与数据库一致性（stale set）；缓存只从主库填 | ★★★ | 22–25 | 07 篇，ADR 0008 |
+| **系统设计与规模化** | 容量估算；推 vs 拉（fan-out），大 V 问题；分片键选择；逻辑分片 vs 一致性哈希；在线迁移；scatter-gather 的尾延迟；热点计数器分片；每个机制在什么规模才需要 | ★★★ | 16–17, 23, 26–28, 37 | system-design.md |
+| **可靠性与可观测性** | 故障隔离（bulkhead）；重试 + 指数退避 + 抖动；降级；readiness vs liveness；指标与告警；SLO、错误预算、burn rate | ★★ | 7–9, 31 | 06 篇，slo.md，runbook.md |
+| **网络与性能** | RTT 与往返次数；pipelining；连接池；压测方法（开放模型 vs 闭合模型）；P50 / P99；定位瓶颈的步骤 | ★★ | 29, 35–36 | 06 篇，benchmark.md，multiregion-experiment |
+| **搜索** | 倒排索引；analyzer 与词干提取；BM25；must vs filter；`search_after` 深分页；mapping 变更与 alias 蓝绿切换；external versioning | ★★ | 10–12 | 03 篇 |
+| **Go 语言**（项目语言，常被顺带问） | goroutine 与 channel；`context` 取消与超时（relay 关闭的 bug 就是这个）；`sync.WaitGroup`、singleflight；竞态检测（`-race`）；用接口做依赖注入以便测试；优雅退出 | ★★ | 39 | `internal/cdc`、`internal/postcache` 的代码 |
+| **安全** | 密码哈希（bcrypt）；JWT（固定算法、吊销）；认证 vs 授权；用户名枚举；上传文件类型嗅探 | ★★ | 13–15 | 04 篇 |
+| **推荐系统** | 两阶段（召回 + 排序）；embedding、kNN、HNSW；特征工程；nDCG；按时间切分与数据泄漏；冷启动；离线指标 vs 线上效果 | ★★（投 ML 相关岗位时 ★★★） | 32–34 | 05 篇，ranking.md |
+| **工程实践** | 集成测试隔离；变异测试；flaky 测试的处理；CI；ADR（架构决策记录）怎么写 | ★★ | 38–40 | engineering-log.md，docs/adr/ |
+| **前端**（简历写了就会问） | Next.js App Router；TanStack Query（缓存、失效、乐观更新）；一致性 token 存在 sessionStorage；Playwright e2e | ★ | — | `web/` |
+| **LLM 集成**（只在简历保留 Gen AI 条目时） | 超时与重试；按用户限流；token 计费；prompt 注入的边界；失败时降级 | ★ | — | ADR 0004 |
+
+**最可能的面试走向**：
+1. 先让他介绍项目（A）；
+2. 挑一个点往下挖，最常见的是一致性（B、G2）或缓存（G4）；
+3. 最后上升到系统设计："如果用户涨 100 倍呢？"（G5、第 37 题）。
+
+所以 ★★★ 的五个领域要能连起来讲：**写入怎么保证不丢 → 派生数据怎么同步 → 读怎么扩展 → 热点怎么扛 → 一台装不下怎么办。**
+
+---
+
 ## A. 开场介绍（用英文练）
 
 **30 秒版本**
