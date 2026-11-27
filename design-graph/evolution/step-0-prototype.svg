@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 660" width="1240" height="660" font-family="'Source Sans 3','Helvetica Neue',Arial,sans-serif">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3b4250"/></marker>
+<marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7b4fb3"/></marker>
+<marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8a4c"/></marker>
+<marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a0a7b4"/></marker>
+<style>
+.t{font-size:15px;font-weight:700}
+.s{font-size:12.5px;fill:#4a5262}
+.l{font-size:12px;paint-order:stroke;stroke:#ffffff;stroke-width:4px;stroke-linejoin:round}
+.tag{font-size:11px;font-weight:700;fill:#ffffff;letter-spacing:.04em}
+</style>
+</defs>
+<rect width="1240" height="660" fill="#ffffff"/>
+<text x="30" y="40" font-size="23" font-weight="700" fill="#1b1f27">Step 0: The original prototype</text>
+<text x="30" y="62" font-size="14" fill="#4a5262">One Go service writing straight to Elasticsearch and Google Cloud Storage.</text>
+<rect x="30" y="255" width="160" height="74" rx="8" fill="#eef0f4" stroke="#5b6474" stroke-width="1.6"/>
+<text x="42" y="277" class="t" fill="#1b1f27">Client</text>
+<text x="42" y="295" class="s">web / curl</text>
+
+<rect x="240" y="225" width="190" height="134" rx="8" fill="#e8f1fb" stroke="#2f6fb3" stroke-width="1.6"/>
+<text x="252" y="247" class="t" fill="#1b1f27">Go API</text>
+<text x="252" y="265" class="s">handlers + JWT</text>
+<text x="252" y="281" class="s">no timeouts</text>
+<text x="252" y="297" class="s">unpaginated search</text>
+
+<rect x="490" y="340" width="240" height="70" rx="8" fill="#fdf3e7" stroke="#c27c2c" stroke-width="1.6"/>
+<text x="502" y="362" class="t" fill="#1b1f27">Elasticsearch</text>
+<text x="502" y="380" class="s">the only datastore:</text>
+<text x="502" y="396" class="s">users + posts, plaintext passwords</text>
+
+<rect x="490" y="488" width="240" height="50" rx="8" fill="#fdf3e7" stroke="#c27c2c" stroke-width="1.6"/>
+<text x="502" y="510" class="t" fill="#1b1f27">Google Cloud Storage</text>
+<text x="502" y="528" class="s">public-ACL objects</text>
+
+<path d="M190,292.0 C215.0,292.0 215.0,292.0 240,292.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="215.0" y="286.0" class="l" text-anchor="middle" fill="#3b4250">REST</text>
+<path d="M430,312.0 C460.0,312.0 460.0,367.0 490,367.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="460.0" y="333.5" class="l" text-anchor="middle" fill="#3b4250">read + write</text>
+<path d="M430,347.0 C460.0,347.0 460.0,513.0 490,513.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="455" y="500" class="l" text-anchor="middle" fill="#3b4250">upload, then write ES</text>
+<g transform="translate(30,630)">
+<rect x="0" y="-11" width="14" height="14" rx="3" fill="#e3f5ea" stroke="#1f8a4c"/><text x="20" y="1" class="l" fill="#3b4250">new in this step</text>
+<rect x="135" y="-11" width="14" height="14" rx="3" fill="#fff4d6" stroke="#b7791f"/><text x="155" y="1" class="l" fill="#3b4250">changed</text>
+<rect x="225" y="-11" width="14" height="14" rx="3" fill="#f2f3f5" stroke="#a0a7b4" stroke-dasharray="3 2"/><text x="245" y="1" class="l" fill="#3b4250">removed</text>
+<path d="M320,-4 L352,-4" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/><text x="360" y="1" class="l" fill="#3b4250">request</text>
+<path d="M425,-4 L457,-4" stroke="#7b4fb3" stroke-width="1.7" marker-end="url(#p)"/><text x="465" y="1" class="l" fill="#3b4250">change stream</text>
+<path d="M565,-4 L597,-4" stroke="#3b4250" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#a)"/><text x="605" y="1" class="l" fill="#3b4250">async / derived</text>
+</g>
+</svg>

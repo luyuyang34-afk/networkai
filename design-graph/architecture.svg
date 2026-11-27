@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 880" width="1400" height="880" font-family="'Source Sans 3', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b4250"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7b4fb3"/>
+    </marker>
+    <style>
+      .t{font-size:15px;font-weight:700;fill:#1b1f27}
+      .s{font-size:12.5px;fill:#4a5262}
+      .l{font-size:12px;fill:#3b4250}
+      .lp{font-size:12px;fill:#6a3fa0}
+      .h{font-size:13px;font-weight:700;fill:#5b6474;letter-spacing:.08em}
+      .svc{fill:#e8f1fb;stroke:#2f6fb3;stroke-width:1.5}
+      .db{fill:#fdf3e7;stroke:#c27c2c;stroke-width:1.5}
+      .q{fill:#f3ecfa;stroke:#7b4fb3;stroke-width:1.5}
+      .cl{fill:#eef0f4;stroke:#5b6474;stroke-width:1.5}
+      .ext{fill:#ffffff;stroke:#8a93a3;stroke-width:1.5;stroke-dasharray:5 4}
+      .so{fill:#eef8f2;stroke:#2e8b57;stroke-width:1.5;stroke-dasharray:6 4}
+      .arr{stroke:#3b4250;stroke-width:1.6;fill:none}
+      .arrd{stroke:#3b4250;stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+      .arrp{stroke:#7b4fb3;stroke-width:1.6;fill:none}
+    </style>
+  </defs>
+  <rect width="1400" height="880" fill="#ffffff"/>
+  <text x="40" y="38" font-size="24" font-weight="700" fill="#1b1f27">NetworkAI architecture</text>
+  <text x="40" y="60" class="s">PostgreSQL is the source of truth. Everything to the right of it is derived from the change stream and can be rebuilt.</text>
+
+  <!-- column headings -->
+  <text x="40" y="100" class="h">CLIENT</text>
+  <text x="250" y="100" class="h">API</text>
+  <text x="520" y="100" class="h">DATA STORES</text>
+  <text x="820" y="100" class="h">CHANGE DATA CAPTURE</text>
+  <text x="1080" y="100" class="h">CONSUMER GROUPS</text>
+
+  <!-- client -->
+  <rect class="cl" x="40" y="290" width="160" height="80" rx="8"/>
+  <text x="56" y="320" class="t">Next.js web</text>
+  <text x="56" y="340" class="s">TypeScript · TanStack</text>
+  <text x="56" y="356" class="s">Query · Playwright</text>
+
+  <!-- API -->
+  <rect class="svc" x="250" y="250" width="200" height="160" rx="8"/>
+  <text x="266" y="280" class="t">Go API × N</text>
+  <text x="266" y="300" class="s">stateless</text>
+  <text x="266" y="322" class="s">JWT auth</text>
+  <text x="266" y="340" class="s">consistency tokens</text>
+  <text x="266" y="358" class="s">feed bulkhead</text>
+  <text x="266" y="376" class="s">Prometheus metrics</text>
+  <text x="266" y="394" class="s">ranking (kNN → ranker)</text>
+
+  <!-- stores -->
+  <rect class="db" x="520" y="115" width="250" height="95" rx="8"/>
+  <text x="536" y="143" class="t">PostgreSQL primary</text>
+  <text x="536" y="163" class="s">source of truth</text>
+  <text x="536" y="181" class="s">post + outbox row in one transaction</text>
+  <text x="536" y="199" class="s">sharded like counters</text>
+
+  <rect class="db" x="520" y="232" width="250" height="68" rx="8"/>
+  <text x="536" y="259" class="t">Streaming replica</text>
+  <text x="536" y="279" class="s">reads routed by LSN token</text>
+
+  <rect class="db" x="520" y="322" width="250" height="100" rx="8"/>
+  <text x="536" y="350" class="t">Redis</text>
+  <text x="536" y="370" class="s">home timelines (hybrid fan-out)</text>
+  <text x="536" y="388" class="s">hot-post cache: singleflight,</text>
+  <text x="536" y="406" class="s">leases, XFetch</text>
+
+  <rect class="db" x="520" y="444" width="250" height="82" rx="8"/>
+  <text x="536" y="472" class="t">Elasticsearch</text>
+  <text x="536" y="492" class="s">full-text search</text>
+  <text x="536" y="510" class="s">kNN retrieval for the feed</text>
+
+  <rect class="ext" x="520" y="548" width="250" height="52" rx="8"/>
+  <text x="536" y="571" class="t">LLM API</text>
+  <text x="536" y="589" class="s">draft assistant (optional)</text>
+
+  <!-- CDC -->
+  <rect class="svc" x="820" y="125" width="190" height="75" rx="8"/>
+  <text x="836" y="153" class="t">CDC relay</text>
+  <text x="836" y="173" class="s">logical decoding of WAL</text>
+  <text x="836" y="190" class="s">confirm LSN after publish</text>
+
+  <rect class="q" x="1080" y="115" width="280" height="95" rx="8"/>
+  <text x="1096" y="143" class="t">Kafka (Redpanda)</text>
+  <text x="1096" y="163" class="s">topic post-events</text>
+  <text x="1096" y="181" class="s">12 partitions keyed by post id</text>
+  <text x="1096" y="199" class="s">per-group dead-letter topics</text>
+
+  <!-- consumers -->
+  <rect class="svc" x="1080" y="236" width="280" height="46" rx="8"/>
+  <text x="1096" y="257" class="t">post-stats</text>
+  <text x="1096" y="274" class="s">idempotent counts (dedupe table)</text>
+  <rect class="svc" x="1080" y="300" width="280" height="46" rx="8"/>
+  <text x="1096" y="321" class="t">timeline-fanout</text>
+  <text x="1096" y="338" class="s">push to followers, skip celebrities</text>
+  <rect class="svc" x="1080" y="364" width="280" height="46" rx="8"/>
+  <text x="1096" y="385" class="t">cache-invalidation</text>
+  <text x="1096" y="402" class="s">second delete path for post cache</text>
+  <rect class="svc" x="1080" y="458" width="280" height="46" rx="8"/>
+  <text x="1096" y="479" class="t">search-indexer</text>
+  <text x="1096" y="496" class="s">external versions, tombstones</text>
+
+  <!-- client -> API -->
+  <path class="arr" d="M200,330 L248,330" marker-end="url(#a)"/>
+  <text x="202" y="318" class="l">REST</text>
+
+  <!-- API -> stores -->
+  <path class="arr" d="M450,280 C485,280 485,170 518,170" marker-end="url(#a)"/>
+  <path class="arr" d="M450,300 C485,300 485,266 518,266" marker-end="url(#a)"/>
+  <path class="arr" d="M450,350 L518,368" marker-end="url(#a)"/>
+  <path class="arr" d="M450,385 C485,385 485,484 518,484" marker-end="url(#a)"/>
+  <path class="arrd" d="M450,400 C470,400 470,574 518,574" marker-end="url(#a)"/>
+
+  <text x="476" y="160" class="l">write</text>
+  <text x="476" y="258" class="l">read</text>
+  <text x="472" y="352" class="l">cache</text>
+  <text x="482" y="470" class="l">search</text>
+  <!-- WAL streaming to replica -->
+  <path class="arrd" d="M645,210 L645,230" marker-end="url(#a)"/>
+  <text x="652" y="224" class="l">WAL streaming</text>
+
+  <!-- PG -> relay -> Kafka -->
+  <path class="arrp" d="M770,162 L818,162" marker-end="url(#ag)"/>
+  <text x="772" y="153" class="lp">WAL</text>
+  <path class="arrp" d="M1010,162 L1078,162" marker-end="url(#ag)"/>
+  <text x="1016" y="153" class="lp">publish</text>
+
+  <!-- Kafka bus -> consumers -->
+  <path class="arrp" d="M1065,190 L1065,481"/>
+  <path class="arrp" d="M1065,259 L1078,259" marker-end="url(#ag)"/>
+  <path class="arrp" d="M1065,323 L1078,323" marker-end="url(#ag)"/>
+  <path class="arrp" d="M1065,387 L1078,387" marker-end="url(#ag)"/>
+  <path class="arrp" d="M1065,481 L1078,481" marker-end="url(#ag)"/>
+  <path class="arrp" d="M1080,190 L1065,190"/>
+
+  <!-- consumers -> stores -->
+  <path class="arrd" d="M1080,259 C930,259 900,195 772,195" marker-end="url(#a)"/>
+  <path class="arrd" d="M1080,323 C920,323 880,372 772,372" marker-end="url(#a)"/>
+  <path class="arrd" d="M1080,387 C930,387 900,404 772,404" marker-end="url(#a)"/>
+  <path class="arrd" d="M1080,481 L772,481" marker-end="url(#a)"/>
+
+  <!-- flow labels in the middle column -->
+  <text x="830" y="245" class="l">counts</text>
+  <text x="830" y="335" class="l">timelines</text>
+  <text x="830" y="418" class="l">invalidate</text>
+  <text x="830" y="474" class="l">index</text>
+
+  <!-- scale-out band -->
+  <line x1="40" y1="630" x2="1360" y2="630" stroke="#dde1e8"/>
+  <text x="40" y="658" class="h">SCALE-OUT SUBSYSTEMS (MEASURED SEPARATELY)</text>
+
+  <rect class="so" x="40" y="675" width="420" height="170" rx="8"/>
+  <text x="56" y="702" class="t">Sharded post store</text>
+  <text x="56" y="722" class="s">64 logical shards by author → physical nodes</text>
+  <rect x="56" y="735" width="80" height="34" rx="5" fill="#ffffff" stroke="#2e8b57"/>
+  <text x="80" y="757" class="s">router</text>
+  <path class="arr" d="M136,752 L164,752" marker-end="url(#a)"/>
+  <rect x="166" y="735" width="60" height="34" rx="5" fill="#fdf3e7" stroke="#c27c2c"/><text x="186" y="757" class="s">N1</text>
+  <rect x="232" y="735" width="60" height="34" rx="5" fill="#fdf3e7" stroke="#c27c2c"/><text x="252" y="757" class="s">N2</text>
+  <rect x="298" y="735" width="60" height="34" rx="5" fill="#fdf3e7" stroke="#c27c2c"/><text x="318" y="757" class="s">N3</text>
+  <rect x="364" y="735" width="60" height="34" rx="5" fill="#fdf3e7" stroke="#c27c2c"/><text x="384" y="757" class="s">N4</text>
+  <text x="56" y="796" class="s">node-side ownership fencing, online shard moves</text>
+  <text x="56" y="816" class="s">2 → 4 nodes under load: 0 of 46,608 writes lost</text>
+
+  <rect class="so" x="490" y="675" width="460" height="170" rx="8"/>
+  <text x="506" y="702" class="t">Two regions</text>
+  <rect x="506" y="718" width="110" height="40" rx="5" fill="#fdf3e7" stroke="#c27c2c"/>
+  <text x="520" y="743" class="s">US primary</text>
+  <path class="arrd" d="M616,738 L700,738" marker-end="url(#a)"/>
+  <text x="622" y="730" class="l">70 ms WAN</text>
+  <rect x="702" y="718" width="110" height="40" rx="5" fill="#fdf3e7" stroke="#c27c2c"/>
+  <text x="716" y="743" class="s">EU replica</text>
+  <text x="506" y="786" class="s">EU app reaches the primary through a switchable VIP</text>
+  <text x="506" y="806" class="s">one-round-trip writes: 429 → 73 ms at 70 ms RTT</text>
+  <text x="506" y="826" class="s">leader lease + self-fencing: 54,803 → 0 split-brain writes</text>
+
+  <rect class="so" x="980" y="675" width="380" height="170" rx="8"/>
+  <text x="996" y="702" class="t">Observability</text>
+  <text x="996" y="726" class="s">Prometheus metrics from API, relay, consumers</text>
+  <text x="996" y="746" class="s">SLOs: 99.9% availability, 99% of reads &lt; 250 ms</text>
+  <text x="996" y="766" class="s">multiwindow burn-rate alerts,</text>
+  <text x="996" y="784" class="s">unit-tested with promtool in CI</text>
+  <text x="996" y="804" class="s">k6 load tests (~1,200 req/s, one machine)</text>
+
+  <!-- legend -->
+  <g transform="translate(820,560)">
+    <path class="arr" d="M0,6 L36,6" marker-end="url(#a)"/><text x="44" y="10" class="l">request path</text>
+    <path class="arrp" d="M150,6 L186,6" marker-end="url(#ag)"/><text x="194" y="10" class="l">change stream</text>
+    <path class="arrd" d="M310,6 L346,6" marker-end="url(#a)"/><text x="354" y="10" class="l">async / derived</text>
+  </g>
+</svg>

@@ -1,0 +1,122 @@
+# promtool test rules deploy/prometheus/slo_test.yml   (make check-alerts)
+# Synthetic traffic: 6000 requests per minute.
+rule_files: [slo.yml]
+evaluation_interval: 1m
+
+tests:
+  # 2% errors (20x the 0.1% budget): page within the hour.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_requests_total{route="GET /posts", status="200"}'
+        values: '0+5880x200'
+      - series: 'networkai_http_requests_total{route="GET /posts", status="500"}'
+        values: '0+120x200'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: APIAvailabilityBudgetBurnFast
+        exp_alerts:
+          - exp_labels: {severity: page, slo: api-availability}
+            exp_annotations:
+              summary: "API availability (99.9%): error budget burning fast (2% of 30 days in 1h, or 5% in 6h)"
+              runbook: "docs/slo.md#api-availability"
+
+  # 0.05% errors for three days: inside the SLO, nobody is woken up.
+  # Health checks failing do not count against the SLO.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_requests_total{route="GET /posts", status="200"}'
+        values: '0+5997x4400'
+      - series: 'networkai_http_requests_total{route="GET /posts", status="500"}'
+        values: '0+3x4400'
+      - series: 'networkai_http_requests_total{route="GET /readyz", status="503"}'
+        values: '0+60x4400'
+    alert_rule_test:
+      - eval_time: 72h
+        alertname: APIAvailabilityBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 72h
+        alertname: APIAvailabilityBudgetBurnSlow
+        exp_alerts: []
+
+  # 0.2% errors for three days: twice the budget. Too slow to page,
+  # but the budget would be gone in 15 days, so a ticket.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_requests_total{route="GET /posts", status="200"}'
+        values: '0+5988x4400'
+      - series: 'networkai_http_requests_total{route="GET /posts", status="500"}'
+        values: '0+12x4400'
+    alert_rule_test:
+      - eval_time: 72h
+        alertname: APIAvailabilityBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 72h
+        alertname: APIAvailabilityBudgetBurnSlow
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: api-availability}
+            exp_annotations:
+              summary: "API availability (99.9%): error budget burning (10% of 30 days in 1d or 3d)"
+              runbook: "docs/slo.md#api-availability"
+
+  # 2% errors for an hour, then fixed: the page clears within 30 minutes
+  # (the short windows see the fix), the ticket stays.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_requests_total{route="GET /posts", status="200"}'
+        values: '0+5880x60 352800+6000x60'
+      - series: 'networkai_http_requests_total{route="GET /posts", status="500"}'
+        values: '0+120x60 7200+0x60'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: APIAvailabilityBudgetBurnFast
+        exp_alerts:
+          - exp_labels: {severity: page, slo: api-availability}
+            exp_annotations:
+              summary: "API availability (99.9%): error budget burning fast (2% of 30 days in 1h, or 5% in 6h)"
+              runbook: "docs/slo.md#api-availability"
+      - eval_time: 95m
+        alertname: APIAvailabilityBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: APIAvailabilityBudgetBurnSlow
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: api-availability}
+            exp_annotations:
+              summary: "API availability (99.9%): error budget burning (10% of 30 days in 1d or 3d)"
+              runbook: "docs/slo.md#api-availability"
+
+  # Reads: 20% of GET /posts slower than 250 ms (budget 1%, burn 20x): page.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_request_duration_seconds_bucket{route="GET /posts", le="0.25"}'
+        values: '0+4800x200'
+      - series: 'networkai_http_request_duration_seconds_count{route="GET /posts"}'
+        values: '0+6000x200'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ReadLatencyBudgetBurnFast
+        exp_alerts:
+          - exp_labels: {severity: page, slo: read-latency}
+            exp_annotations:
+              summary: "Read latency (99% under 250 ms): error budget burning fast (2% of 30 days in 1h, or 5% in 6h)"
+              runbook: "docs/slo.md#read-latency"
+
+  # 5% slow is a 5x burn: below both page thresholds (14.4x, 6x), above
+  # the 3x ticket threshold.
+  - interval: 1m
+    input_series:
+      - series: 'networkai_http_request_duration_seconds_bucket{route="GET /posts/{id}", le="0.25"}'
+        values: '0+5700x200'
+      - series: 'networkai_http_request_duration_seconds_count{route="GET /posts/{id}"}'
+        values: '0+6000x200'
+    alert_rule_test:
+      - eval_time: 150m
+        alertname: ReadLatencyBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: ReadLatencyBudgetBurnSlow
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: read-latency}
+            exp_annotations:
+              summary: "Read latency (99% under 250 ms): error budget burning (10% of 30 days in 1d or 3d)"
+              runbook: "docs/slo.md#read-latency"

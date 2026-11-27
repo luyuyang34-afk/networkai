@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 660" width="1240" height="660" font-family="'Source Sans 3','Helvetica Neue',Arial,sans-serif">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3b4250"/></marker>
+<marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7b4fb3"/></marker>
+<marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8a4c"/></marker>
+<marker id="x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a0a7b4"/></marker>
+<style>
+.t{font-size:15px;font-weight:700}
+.s{font-size:12.5px;fill:#4a5262}
+.l{font-size:12px;paint-order:stroke;stroke:#ffffff;stroke-width:4px;stroke-linejoin:round}
+.tag{font-size:11px;font-weight:700;fill:#ffffff;letter-spacing:.04em}
+</style>
+</defs>
+<rect width="1240" height="660" fill="#ffffff"/>
+<text x="30" y="40" font-size="23" font-weight="700" fill="#1b1f27">Step 4: Follow graph and hybrid fan-out home timelines</text>
+<text x="30" y="62" font-size="14" fill="#4a5262">Regular authors are pushed to followers&#x27; Redis timelines; celebrities are pulled at read time.</text>
+<rect x="30" y="255" width="160" height="74" rx="8" fill="#fff4d6" stroke="#b7791f" stroke-width="1.6"/>
+<text x="42" y="277" class="t" fill="#1b1f27">Next.js web</text>
+<text x="42" y="295" class="s">Following tab, follow buttons</text>
+<rect x="124.6" y="246" width="59.4" height="18" rx="9" fill="#b7791f"/><text x="154.3" y="259" text-anchor="middle" class="tag">CHANGED</text>
+<rect x="240" y="225" width="190" height="134" rx="8" fill="#fff4d6" stroke="#b7791f" stroke-width="1.6"/>
+<text x="252" y="247" class="t" fill="#1b1f27">Go API</text>
+<text x="252" y="265" class="s">home timeline: Redis range</text>
+<text x="252" y="281" class="s">+ pull celebrities from PG</text>
+<text x="252" y="297" class="s">two-stage feed, bulkhead</text>
+<rect x="364.6" y="216" width="59.4" height="18" rx="9" fill="#b7791f"/><text x="394.3" y="229" text-anchor="middle" class="tag">CHANGED</text>
+<rect x="490" y="80" width="240" height="86" rx="8" fill="#fff4d6" stroke="#b7791f" stroke-width="1.6"/>
+<text x="502" y="102" class="t" fill="#1b1f27">PostgreSQL</text>
+<text x="502" y="120" class="s">+ follows, follower counts</text>
+<text x="502" y="136" class="s">posts, likes, outbox</text>
+<rect x="664.6" y="71" width="59.4" height="18" rx="9" fill="#b7791f"/><text x="694.3" y="84" text-anchor="middle" class="tag">CHANGED</text>
+<rect x="490" y="248" width="240" height="76" rx="8" fill="#e3f5ea" stroke="#1f8a4c" stroke-width="1.6"/>
+<text x="502" y="270" class="t" fill="#1b1f27">Redis</text>
+<text x="502" y="288" class="s">home timelines (sorted sets)</text>
+<text x="502" y="304" class="s">capped, expire when unread</text>
+<rect x="693.4" y="239" width="30.6" height="18" rx="9" fill="#1f8a4c"/><text x="708.7" y="252" text-anchor="middle" class="tag">NEW</text>
+<rect x="490" y="340" width="240" height="70" rx="8" fill="#fdf3e7" stroke="#c27c2c" stroke-width="1.6"/>
+<text x="502" y="362" class="t" fill="#1b1f27">Elasticsearch</text>
+<text x="502" y="380" class="s">search + kNN</text>
+
+<rect x="490" y="426" width="240" height="46" rx="8" fill="#ffffff" stroke="#8a93a3" stroke-width="1.6" stroke-dasharray="5 4"/>
+<text x="502" y="448" class="t" fill="#1b1f27">LLM API</text>
+<text x="502" y="466" class="s">draft assistant</text>
+
+<rect x="490" y="488" width="240" height="50" rx="8" fill="#fdf3e7" stroke="#c27c2c" stroke-width="1.6"/>
+<text x="502" y="510" class="t" fill="#1b1f27">Media store</text>
+<text x="502" y="528" class="s">disk or GCS</text>
+
+<rect x="790" y="190" width="190" height="76" rx="8" fill="#fff4d6" stroke="#b7791f" stroke-width="1.6"/>
+<text x="802" y="212" class="t" fill="#1b1f27">Outbox worker</text>
+<text x="802" y="230" class="s">index AND fan-out</text>
+<text x="802" y="246" class="s">in one loop (coupled)</text>
+<rect x="914.6" y="181" width="59.4" height="18" rx="9" fill="#b7791f"/><text x="944.3" y="194" text-anchor="middle" class="tag">CHANGED</text>
+<rect x="240" y="420" width="190" height="62" rx="8" fill="#e8f1fb" stroke="#2f6fb3" stroke-width="1.6"/>
+<text x="252" y="442" class="t" fill="#1b1f27">Prometheus</text>
+<text x="252" y="460" class="s">+ fan-out metrics</text>
+
+<path d="M190,292.0 C215.0,292.0 215.0,292.0 240,292.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="215.0" y="286.0" class="l" text-anchor="middle" fill="#3b4250">REST</text>
+<path d="M430,247.0 C460.0,247.0 460.0,123.0 490,123.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="455" y="150" class="l" text-anchor="middle" fill="#3b4250">write, pull celebs</text>
+<path d="M430,287.0 C460.0,287.0 460.0,286.0 490,286.0" fill="none" stroke="#1f8a4c" stroke-width="1.7" marker-end="url(#g)"/>
+<text x="455" y="268" class="l" text-anchor="middle" fill="#1f8a4c">timeline</text>
+<path d="M430,322.0 C460.0,322.0 460.0,375.0 490,375.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="455" y="360" class="l" text-anchor="middle" fill="#3b4250">search + kNN</text>
+<path d="M730,138.0 C760.0,138.0 760.0,210.0 790,210.0" fill="none" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/>
+<text x="760.0" y="168.0" class="l" text-anchor="middle" fill="#3b4250">poll outbox</text>
+<path d="M790,228.0 C760.0,228.0 760.0,286.0 730,286.0" fill="none" stroke="#1f8a4c" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#g)"/>
+<text x="760" y="262" class="l" text-anchor="middle" fill="#1f8a4c">fan-out (push)</text>
+<path d="M790,228.0 C760.0,228.0 760.0,365.0 730,365.0" fill="none" stroke="#3b4250" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#a)"/>
+<text x="760" y="356" class="l" text-anchor="middle" fill="#3b4250">index</text>
+<path d="M335.0,420 C335.0,389.5 335.0,389.5 335.0,359" fill="none" stroke="#3b4250" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#a)"/>
+<text x="360" y="398" class="l" text-anchor="middle" fill="#3b4250">scrape</text>
+<g transform="translate(30,630)">
+<rect x="0" y="-11" width="14" height="14" rx="3" fill="#e3f5ea" stroke="#1f8a4c"/><text x="20" y="1" class="l" fill="#3b4250">new in this step</text>
+<rect x="135" y="-11" width="14" height="14" rx="3" fill="#fff4d6" stroke="#b7791f"/><text x="155" y="1" class="l" fill="#3b4250">changed</text>
+<rect x="225" y="-11" width="14" height="14" rx="3" fill="#f2f3f5" stroke="#a0a7b4" stroke-dasharray="3 2"/><text x="245" y="1" class="l" fill="#3b4250">removed</text>
+<path d="M320,-4 L352,-4" stroke="#3b4250" stroke-width="1.7" marker-end="url(#a)"/><text x="360" y="1" class="l" fill="#3b4250">request</text>
+<path d="M425,-4 L457,-4" stroke="#7b4fb3" stroke-width="1.7" marker-end="url(#p)"/><text x="465" y="1" class="l" fill="#3b4250">change stream</text>
+<path d="M565,-4 L597,-4" stroke="#3b4250" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#a)"/><text x="605" y="1" class="l" fill="#3b4250">async / derived</text>
+</g>
+</svg>

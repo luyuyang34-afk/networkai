@@ -1,0 +1,138 @@
+// Package testutil provides throwaway databases for integration tests.
+//
+// Integration tests run only when TEST_DATABASE_URL (and, for search tests,
+// TEST_ES_URL) are set; otherwise they are skipped so `go test ./...` works on
+// any machine. `make test-integration` sets them against docker compose.
+package testutil
+
+import (
+	"context"
+	"fmt"
+	"math/rand/v2"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"networkai/internal/db"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+)
+
+// NewDB creates a fresh, migrated database and drops it when the test ends,
+// so tests never see each other's rows and can run in parallel.
+func NewDB(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	adminURL := os.Getenv("TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
+	}
+	ctx := context.Background()
+
+	admin, err := pgx.Connect(ctx, adminURL)
+	if err != nil {
+		t.Fatalf("connect admin db: %v", err)
+	}
+	defer admin.Close(ctx)
+
+	name := fmt.Sprintf("networkai_test_%d", rand.Uint64())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+
+	u, err := url.Parse(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + name
+	pool, err := db.Connect(ctx, u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		c, err := pgx.Connect(context.Background(), adminURL)
+		if err != nil {
+			return
+		}
+		defer c.Close(context.Background())
+		c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)") //nolint:errcheck
+	})
+
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return pool
+}
+
+// ESURL returns the Elasticsearch URL for search integration tests or skips.
+func ESURL(t testing.TB) string {
+	t.Helper()
+	u := os.Getenv("TEST_ES_URL")
+	if u == "" {
+		t.Skip("TEST_ES_URL not set; skipping Elasticsearch integration test")
+	}
+	return u
+}
+
+// Redis returns a client for TEST_REDIS_URL and a random key prefix, or skips.
+func Redis(t testing.TB) (*redis.Client, string) {
+	t.Helper()
+	u := os.Getenv("TEST_REDIS_URL")
+	if u == "" {
+		t.Skip("TEST_REDIS_URL not set; skipping Redis integration test")
+	}
+	opt, err := redis.ParseURL(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := redis.NewClient(opt)
+	t.Cleanup(func() { c.Close() })
+	return c, fmt.Sprintf("test%d:", rand.Uint64())
+}
+
+// Kafka returns TEST_KAFKA_BROKERS and a unique topic name, or skips.
+func Kafka(t testing.TB) ([]string, string) {
+	t.Helper()
+	b := os.Getenv("TEST_KAFKA_BROKERS")
+	if b == "" {
+		t.Skip("TEST_KAFKA_BROKERS not set; skipping Kafka integration test")
+	}
+	return strings.Split(b, ","), fmt.Sprintf("test-events-%d", rand.Uint64())
+}
+
+// Replica returns a pool on the read replica for the same database as
+// primary (physical replication copies new databases too), or skips. It
+// waits until the database has been replayed on the replica.
+func Replica(t testing.TB, primary *pgxpool.Pool) *pgxpool.Pool {
+	t.Helper()
+	ru := os.Getenv("TEST_REPLICA_URL")
+	if ru == "" {
+		t.Skip("TEST_REPLICA_URL not set; skipping read-replica test")
+	}
+	u, err := url.Parse(ru)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + primary.Config().ConnConfig.Database
+	ctx := context.Background()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		pool, err := db.Connect(ctx, u.String())
+		if err == nil {
+			var n int
+			if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&n); err == nil && n > 0 {
+				t.Cleanup(pool.Close)
+				return pool
+			}
+			pool.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("database never appeared on the replica: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}

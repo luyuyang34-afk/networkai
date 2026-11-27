@@ -1,0 +1,119 @@
+# NetworkAI mock interview
+
+One main question and two follow-ups for each resume bullet, the way an
+interviewer would drill in.
+
+Each question lists what a good answer covers. **Trap** and **Bonus** notes
+mark what separates an average answer from a strong one. Fuller answers are
+in [interview-prep.md](interview-prep.md) (Part 1: design questions; Part 2:
+stories).
+
+---
+
+## Mock interview by resume bullet
+
+### Bullet 1: Online Resharding
+
+**Q: "Walk me through how you moved a shard to another database while it was still taking writes."**
+
+Key points:
+1. Copy the shard in rounds without locks.
+2. Lock only that shard's ownership row, which waits for in-flight writes.
+3. Copy the final delta.
+4. The source gives up ownership first, then the target takes over, then
+   the directory is updated.
+
+The median write pause per shard was 46 ms.
+
+**Follow-up 1: "A router has an old copy of the shard map and sends a write to the old node. What happens?"**
+- Every write checks ownership on the node, inside its own transaction.
+  The old node answers "moved", and the router reloads the map and
+  retries.
+- Key point: the node decides ownership, not the router.
+
+**Follow-up 2: "Your incremental rounds copy 'rows changed since the last round'. How do you avoid missing a transaction that started before a round but committed after it?"**
+- Each round starts from the previous round's snapshot xmin, the oldest
+  transaction still running then, not from "the highest transaction id
+  seen".
+- **Bonus:** mentioning that the load test caught this bug only 1 time in
+  3, so he turned it into a deterministic test that fails every time.
+
+### Bullet 2: Cache Consistency at Scale
+
+**Q: "You delete the cache key on every write. How can the cache still serve stale data?"**
+
+Key points: the stale-set race.
+1. A slow reader loads version 1.
+2. The writer commits version 2 and deletes the key.
+3. The slow reader writes version 1 back into the cache.
+
+The cache stays wrong until the next edit or the TTL. Measured: 29.5% of
+reads were stale.
+
+**Follow-up 1: "Why wasn't singleflight enough?"**
+- Singleflight only merges requests within one process, so database loads
+  grow with the instance count: 32/s with 8 instances, 128/s with 32. It
+  also cannot stop stale write-backs.
+- Leases work across instances. Only the lease holder may fill the cache,
+  and deleting the key also deletes the lease.
+- **Bonus:** the load test showed 0% stale with singleflight, but that was
+  timing luck.
+
+**Follow-up 2: "What if the API crashes right after committing, before it deletes the key? What if the lease holder crashes?"**
+- If the API crashes after committing, a CDC consumer group deletes the
+  key again from the change stream. Deleting twice is harmless.
+- If the lease holder crashes, the lease expires after 2 s. Meanwhile,
+  other readers are served from the database without filling the cache.
+
+### Bullet 3: Region Failover
+
+**Q: "How did your drill produce 54,803 split-brain writes, and how does fencing prevent that?"**
+
+Key points:
+- During the partition, US clients could still write to the US primary.
+  EU detected the failure and promoted its replica, so both regions
+  accepted writes.
+- How fencing works:
+  - the primary must renew a lease through a witness, and makes itself
+    read-only when it can't;
+  - EU waits for the lease to expire before promoting.
+
+**Follow-up 1: "So fencing fixed it. Did you lose any data?"**
+- Yes. Writes the primary accepted between the partition and the fence are
+  still lost. Async replication always has a non-zero RPO.
+- Synchronous replication loses nothing, but adds 72 ms per write, and the
+  cut-off US region cannot write at all. That is the CAP trade-off, and the
+  choice depends on the type of data.
+- **Trap:** if he says fencing solved everything, he hasn't understood it.
+
+**Follow-up 2: "You cut cross-region post latency from 429 to 73 ms. How? And why couldn't the consistency token be read in the same SQL statement as the insert?"**
+- BEGIN, two INSERTs, a SELECT and COMMIT became one CTE statement. The
+  token query is pipelined right behind it with its own Sync. Six round
+  trips became one.
+- An LSN read inside the same statement comes before the commit record. A
+  replica could reach that position without having applied the commit,
+  which breaks read-your-writes.
+
+### Bullet 4: Performance Debugging
+
+**Q: "Search collapsed at 1,000 requests per second. How did you figure out the personalized feed was the cause?"**
+
+Key points:
+- Elasticsearch's search thread pool was full: 51,138 rejected requests.
+- A control experiment: the same load without the feed had 0 failures.
+
+**Follow-up 1: "Your first fix, the bulkhead, didn't help. Why not, and what did that tell you?"**
+- The hypothesis was "too much concurrency fills the thread pool". Search
+  still collapsed with feed concurrency limited to 1, so the hypothesis was
+  wrong.
+- Load-testing the feed alone showed each request used about 3x the CPU
+  its `took` time suggested: kNN uses concurrent segment search, so one
+  query occupies several cores.
+- Lesson: measure resource cost, not just latency.
+
+**Follow-up 2: "You removed the more_like_this query. How did you know recommendations didn't get worse?"**
+- He tracked which retrieval source each served item came from: only 1%
+  came solely from that query. Without it, the top 20 results were 100% the
+  same for all 40 users sampled.
+- **Bonus:** "measure what a feature is worth before paying for it."
+

@@ -1,0 +1,242 @@
+# One command to run everything locally:  docker compose up --build
+#
+# api                -> http://localhost:8080
+# relay              -> CDC: PostgreSQL WAL -> Kafka topic post-events
+# consumer-search    -> group search-indexer  (Elasticsearch)
+# consumer-timeline  -> group timeline-fanout (Redis home timelines)
+# consumer-stats     -> group post-stats      (replays history from the log)
+# consumer-cache     -> group cache-invalidation (post cache, ADR 0008)
+#
+# The previous polling worker is kept for comparison:
+#   docker compose --profile poll up -d indexer   (stop the relay first)
+#
+# The secrets below are for local development only.
+x-app-env: &app-env
+  DATABASE_URL: postgres://networkai:networkai@postgres:5432/networkai?sslmode=disable
+  REPLICA_DATABASE_URL: postgres://networkai:networkai@postgres-replica:5432/networkai?sslmode=disable
+  ES_URL: http://elasticsearch:9200
+  REDIS_URL: redis://redis:6379/0
+  KAFKA_BROKERS: redpanda:9092
+  CELEBRITY_THRESHOLD: ${CELEBRITY_THRESHOLD:-10000}
+  POST_CACHE: ${POST_CACHE:-protected}
+  JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-do-not-use-in-prod}
+  MEDIA_BACKEND: local
+  MEDIA_BASE_URL: http://localhost:8080/media
+  CORS_ORIGINS: http://localhost:3000
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-worker: &worker
+  build: .
+  environment: *app-env
+  restart: unless-stopped
+  depends_on:
+    postgres: {condition: service_healthy}
+    redpanda: {condition: service_healthy}
+    api: {condition: service_started} # api applies migrations on start
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # Logical decoding for CDC (the relay reads the WAL through a slot).
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10",
+              "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    environment:
+      POSTGRES_USER: networkai
+      POSTGRES_PASSWORD: networkai
+      POSTGRES_DB: networkai
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 2s
+      retries: 30
+
+  # Streaming read replica (cloned from the primary on first start). Set
+  # REPLICA_APPLY_DELAY=2s to make replication lag visible on purpose.
+  postgres-replica:
+    image: postgres:16-alpine
+    entrypoint: ["/replica-entrypoint.sh"]
+    command: ["-c", "max_wal_senders=10", "-c", "max_replication_slots=10"]
+    environment:
+      POSTGRES_USER: networkai
+      POSTGRES_PASSWORD: networkai
+      PRIMARY_HOST: postgres
+      REPLICA_APPLY_DELAY: ${REPLICA_APPLY_DELAY:-0}
+    ports: ["5433:5432"]
+    volumes:
+      - pgreplica:/var/lib/postgresql/data
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./deploy/postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 2s
+      retries: 60
+
+  elasticsearch:
+    image: elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs localhost:9200/_cluster/health >/dev/null"]
+      interval: 3s
+      retries: 60
+
+  # Home timelines (a cache: rebuilt from PostgreSQL if lost).
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "512mb", "--maxmemory-policy", "volatile-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  # Kafka-API-compatible broker (single node, development settings).
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command: ["redpanda", "start", "--mode", "dev-container", "--smp", "1", "--memory", "1G",
+              "--kafka-addr", "internal://0.0.0.0:9092,external://0.0.0.0:19092",
+              "--advertise-kafka-addr", "internal://redpanda:9092,external://localhost:19092"]
+    ports: ["19092:19092"]
+    volumes: [rpdata:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      retries: 40
+
+  api:
+    build: .
+    command: ["api"]
+    environment: *app-env
+    ports: ["8080:8080"]
+    volumes: [media:/data/media]
+    # Deliberately NOT depending on elasticsearch, redis or redpanda: the API
+    # must keep accepting writes while any of them is down (ADR 0001).
+    depends_on:
+      postgres: {condition: service_healthy}
+      postgres-replica: {condition: service_healthy}
+
+  relay:
+    <<: *worker
+    command: ["relay"]
+
+  consumer-search:
+    <<: *worker
+    command: ["consume", "search-indexer"]
+
+  consumer-timeline:
+    <<: *worker
+    command: ["consume", "timeline-fanout"]
+
+  consumer-stats:
+    <<: *worker
+    command: ["consume", "post-stats"]
+
+  consumer-cache:
+    <<: *worker
+    command: ["consume", "cache-invalidation"]
+
+  # The pre-CDC polling worker (indexing + fan-out in one loop), for
+  # comparison experiments only.
+  indexer:
+    build: .
+    command: ["indexer"]
+    environment: *app-env
+    profiles: [poll]
+    depends_on:
+      postgres: {condition: service_healthy}
+      api: {condition: service_started}
+
+  # Sharding experiment (ADR 0009): four independent PostgreSQL nodes.
+  #   docker compose --profile shards up -d
+  #   go run ./tools/experiments/reshard
+  pg-shard-1: &shard-node
+    image: postgres:16-alpine
+    profiles: [shards]
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    environment: {POSTGRES_USER: networkai, POSTGRES_PASSWORD: networkai, POSTGRES_DB: shard}
+    ports: ["5441:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 2s
+      retries: 30
+  pg-shard-2:
+    <<: *shard-node
+    ports: ["5442:5432"]
+  pg-shard-3:
+    <<: *shard-node
+    ports: ["5443:5432"]
+  pg-shard-4:
+    <<: *shard-node
+    ports: ["5444:5432"]
+
+  # Region-failover drill (tools/experiments/failover). A separate, throwaway
+  # cluster: region US holds the primary, region EU a replica that streams
+  # over a simulated 70 ms RTT link, and the EU app reaches "the primary"
+  # through vip-eu (a switchable endpoint, like a DNS name or load balancer).
+  pg-us:
+    image: postgres:16-alpine
+    profiles: [multiregion]
+    # Starts asynchronous; the drill switches to synchronous replication
+    # with ALTER SYSTEM once the replica streams (setting it at startup
+    # would hang initdb's CREATE DATABASE, waiting for a standby that does
+    # not exist yet).
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    environment: {POSTGRES_USER: networkai, POSTGRES_PASSWORD: networkai, POSTGRES_DB: drill}
+    ports: ["5451:5432"]
+    volumes: ["./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 1s
+      retries: 30
+  wan-repl: # US -> EU replication link
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-us:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["19111:9100"]
+  pg-eu:
+    image: postgres:16-alpine
+    profiles: [multiregion]
+    entrypoint: ["/replica-entrypoint.sh"]
+    # cluster_name is the standby name the primary waits for in sync mode.
+    command: ["-c", "cluster_name=pg_eu"]
+    environment: {POSTGRES_USER: networkai, POSTGRES_PASSWORD: networkai, PRIMARY_HOST: wan-repl}
+    ports: ["5452:5432"]
+    volumes:
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./deploy/postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on: [pg-us, wan-repl]
+  wan-witness: # US -> witness link, for the US primary's leader lease
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-eu:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["5454:5432", "19113:9100"]
+  vip-eu: # what the EU app uses as "the primary"
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-us:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["5453:5432", "19112:9100"]
+
+  # Optional: docker compose --profile observability up -d
+  # Prometheus UI at http://localhost:9090 (Alerts tab shows rule state).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    ports: ["9090:9090"]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+
+volumes:
+  pgdata:
+  pgreplica:
+  esdata:
+  rpdata:
+  media:
