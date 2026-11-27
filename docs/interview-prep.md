@@ -1,12 +1,15 @@
 # NetworkAI interview prep
 
-Two parts:
+Three parts:
 
 1. **The five design questions** an interviewer is most likely to ask about
    this project, each with a short spoken answer, the design behind it, the
    numbers, and the follow-ups.
 2. **The five hardest problems** solved while building it, told as stories:
    situation, what went wrong, how it was found, the fix, and the proof.
+3. **"What if users grow 100x?"**, the follow-up that closes most
+   system design rounds: how to structure the answer, what breaks first,
+   and the sub-questions that come after it.
 
 Every number here comes from an experiment in this repository and has a
 measurement condition. All experiments ran on one 4-vCPU machine; multiple
@@ -388,3 +391,186 @@ feed data uses async with fencing; money would use synchronous commit.
 - Measure resource cost, not only latency: `took` hid most of the cost.
 - Test a hypothesis with a control before building on it.
 - Measure a feature's value before paying for it.
+
+---
+
+## Part 3: "What if users grow 100x?"
+
+This is usually the last question of the round. The interviewer wants to
+see whether you can find the bottleneck from numbers, not whether you can
+name every technology.
+
+Each item below is tagged:
+- **[built]**: implemented and measured in this project;
+- **[built, isolated]**: implemented and measured as a subsystem, not yet
+  wired into the API;
+- **[proposed]**: not built; it is the design you would describe.
+
+Never present a [proposed] item as done.
+
+### How to structure the answer (about 2 minutes)
+
+1. **Put numbers on it first.**
+   - "100x is roughly 100k → 10M daily active users."
+   - Then state the peaks (table below) and say which numbers grow
+     faster than users: fan-out, and traffic on viral posts.
+2. **Name what breaks first, and why**, from measurements, not guesses.
+3. **Fix things in the order they break**, cheapest change with the most
+   headroom first. Sharding comes late because it is the most expensive
+   change.
+4. **Say what stays the same.**
+   - PostgreSQL as the source of truth, the outbox/CDC pipeline and
+     idempotent consumers do not change at 100x. That is the point of
+     the architecture.
+5. **End with what you would measure** before committing to the plan.
+
+### The estimate
+
+Assumptions per daily user:
+- 0.5 posts;
+- 10 timeline loads of 20 posts;
+- 20 likes;
+- 200 followers on average, power-law distributed;
+- peak = 3x average.
+
+| | 100k DAU | 10M DAU (100x) |
+|---|---|---|
+| Posts written, peak | ~2/s | ~175/s |
+| Timeline loads, peak | ~35/s | ~3,500/s |
+| Post lookups for hydration, peak | ~700/s | **~70,000/s** |
+| Likes, peak | ~70/s | ~7,000/s, concentrated on viral posts |
+| Fan-out writes, peak | ~350/s | **~35,000/s** |
+| New post text | 50 MB/day | 5 GB/day, ~1.8 TB/year (media separate) |
+| Timeline cache, if every user had one | 5 GB | **~500 GB** |
+
+Writes stay modest: 175 posts/s is easy for one PostgreSQL primary. The
+growth is in **reads, fan-out and storage**, and in hot spots.
+
+### What breaks first, in order
+
+**1. The personalised "For you" feed.**
+- *Why first:* it is measured as the most expensive endpoint by about 10x.
+  Under mixed load it served about 22 req/s on one 4-vCPU machine before
+  the bulkhead started shedding [built]. It scales with every reader.
+- *Fix:*
+  - precompute feeds for active users in the background and cache each
+    user's candidates for a few minutes [proposed];
+  - run vector search on its own Elasticsearch nodes, so it cannot starve
+    keyword search [proposed];
+  - meanwhile, the bulkhead keeps a feed overload from taking search down
+    [built].
+- *Also:* give the feed its own, looser SLO, or serve a cached
+  non-personalised feed instead of a 503. Otherwise shedding burns the
+  API's availability budget [proposed; the problem is measured in
+  `slo.md`].
+
+**2. Read volume: about 70k post lookups per second.**
+- *Why:* every timeline load hydrates 20 posts.
+- *Fix:*
+  - add read replicas; consistency tokens keep read-your-writes [built];
+  - add a multi-get post cache for hydration, reusing the lease-based
+    single-post cache [the single-post cache is built; multi-get is
+    proposed];
+  - the stateless API scales horizontally behind a load balancer.
+- *Watch out:* with several replicas, a user can see older data after
+  newer data, when consecutive reads hit replicas at different lag. Fix:
+  send the token on every read, or pin a session to one replica (noted in
+  ADR 0007).
+
+**3. Fan-out and timeline memory.**
+- *Why:* about 35k timeline writes/s at peak, and about 500 GB if every
+  user had a cached timeline.
+- *Fix:*
+  - only active users keep a timeline: a 7-day TTL and a cap of 800
+    entries [built];
+  - tune the celebrity threshold from the real follower distribution
+    [built, configurable];
+  - shard Redis by user id with Redis Cluster [proposed];
+  - add Kafka partitions, since partitions cap consumer parallelism: 12
+    today, scaled to the consumer count [proposed]. The post-id key keeps
+    per-post ordering.
+
+**4. One primary's storage and maintenance.**
+- *Why:* about 1.8 TB/year of text plus likes and follows. Vacuum, backup
+  and restore time grow with one machine's data before its write
+  throughput runs out.
+- *Fix:* the sharded store, with 64 logical shards by author and online
+  moves [built, isolated]. Moving the API onto it means:
+  - co-locating likes and outbox rows with their post's shard;
+  - one CDC relay per node;
+  - replacing the user join with a lookup.
+
+  That is a planned migration, not a flag flip.
+
+**5. Users on several continents.**
+- *Why:* every cross-region round trip costs tens of milliseconds.
+- *Fix:*
+  - local read replicas and caches in each region;
+  - one-round-trip writes [built: 429 → 73 ms at 70 ms RTT];
+  - route each user's writes to a home region that owns their shard
+    [proposed];
+  - fenced failover [built in a drill].
+
+**Also mention briefly**
+- Media goes to object storage behind a CDN. Storage on GCS is built; the
+  CDN is proposed.
+- Search: add Elasticsearch shards and replicas. The shard count is
+  changed by building a new index and swapping the alias. The blue/green
+  rebuild is built; changing the shard count with it was not exercised.
+- Operations: per-feature SLOs, burn-rate alerts [built], autoscaling the
+  stateless tiers, and load shedding at the edge.
+
+### Sub-questions that usually follow
+
+**"Which one do you do first?"**
+- Measure first. Find the per-request cost of each endpoint at the
+  current load, then fix what breaks soonest with the cheapest change.
+- Here that means feed precomputation and caching, then replicas and the
+  hydration cache. Sharding comes last: it is the most expensive change,
+  and storage gives warning months ahead.
+
+**"How many machines would you need?"**
+- Do not extrapolate from one shared 4-vCPU box: every service and the
+  load generator shared those CPUs.
+- The method: profile each tier's cost per request, multiply by the peak
+  rate, add headroom for failover (N+1 per tier), and load-test the
+  plan.
+- Single-node figures that are safe to quote: one Redis node handles on
+  the order of 100k simple operations per second, so ~3,500 timeline
+  reads/s is not the problem; memory is.
+
+**"What happens to consistency at that scale?"**
+- The guarantees stay the same: at-least-once with idempotent consumers,
+  and read-your-writes per device via tokens.
+- What changes: more replicas need monotonic reads (see above), and
+  cross-device read-your-writes would need the token stored with the
+  user's session, not on the device.
+
+**"A celebrity with 50 million followers posts. Walk me through it."**
+1. The write is one row plus one outbox event; there is no fan-out.
+2. Followers pull the post at read time. That makes it a hot key, so the
+   post cache with leases and XFetch serves it with about one database
+   load per change [built].
+3. Its likes go to sharded counters [built]. For extreme posts, make the
+   shard count adaptive [proposed].
+
+**"What would you not change?"**
+- PostgreSQL as the source of truth; the outbox/CDC pipeline; idempotent,
+  independent consumers; tokens for read-your-writes.
+- Each of these was chosen so that adding capacity means adding nodes
+  (replicas, partitions, shards), not redesigning.
+
+**"What is the biggest risk in your plan?"**
+- The sharding migration: cross-shard queries and transactions disappear,
+  and every query has to be checked.
+- The online move itself is proven [built, isolated]: 0 of 46,608 writes
+  lost under load. Rewriting the application's queries is the real work.
+
+### Red lines for this question
+
+- Do not say the system "handles 10M users". It was never run at that
+  scale.
+- Do not extrapolate machine counts linearly from the single-machine
+  benchmark.
+- Mark proposed items as proposed. "I built X and measured Y; at 100x I
+  would add Z" is much stronger than claiming Z exists.
