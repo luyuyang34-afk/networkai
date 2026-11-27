@@ -178,6 +178,53 @@ services:
     <<: *shard-node
     ports: ["5444:5432"]
 
+  # Region-failover drill (tools/experiments/failover). A separate, throwaway
+  # cluster: region US holds the primary, region EU a replica that streams
+  # over a simulated 70 ms RTT link, and the EU app reaches "the primary"
+  # through vip-eu (a switchable endpoint, like a DNS name or load balancer).
+  pg-us:
+    image: postgres:16-alpine
+    profiles: [multiregion]
+    # Starts asynchronous; the drill switches to synchronous replication
+    # with ALTER SYSTEM once the replica streams (setting it at startup
+    # would hang initdb's CREATE DATABASE, waiting for a standby that does
+    # not exist yet).
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    environment: {POSTGRES_USER: networkai, POSTGRES_PASSWORD: networkai, POSTGRES_DB: drill}
+    ports: ["5451:5432"]
+    volumes: ["./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U networkai"]
+      interval: 1s
+      retries: 30
+  wan-repl: # US -> EU replication link
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-us:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["19111:9100"]
+  pg-eu:
+    image: postgres:16-alpine
+    profiles: [multiregion]
+    entrypoint: ["/replica-entrypoint.sh"]
+    # cluster_name is the standby name the primary waits for in sync mode.
+    command: ["-c", "cluster_name=pg_eu"]
+    environment: {POSTGRES_USER: networkai, POSTGRES_PASSWORD: networkai, PRIMARY_HOST: wan-repl}
+    ports: ["5452:5432"]
+    volumes:
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./deploy/postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on: [pg-us, wan-repl]
+  wan-witness: # US -> witness link, for the US primary's leader lease
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-eu:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["5454:5432", "19113:9100"]
+  vip-eu: # what the EU app uses as "the primary"
+    image: ${NETWORKAI_IMAGE:-networkai-local}
+    profiles: [multiregion]
+    entrypoint: ["wanproxy", "-listen", ":5432", "-target", "pg-us:5432", "-delay", "35ms", "-admin", ":9100"]
+    ports: ["5453:5432", "19112:9100"]
+
   # Optional: docker compose --profile observability up -d
   # Prometheus UI at http://localhost:9090 (Alerts tab shows rule state).
   prometheus:

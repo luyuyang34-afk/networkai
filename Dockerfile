@@ -5,7 +5,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/networkai ./cmd/networkai
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/networkai ./cmd/networkai && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wanproxy ./cmd/wanproxy
 
 FROM alpine:3.22
 # CA certificates come from the build stage, so this stage needs no network.
@@ -13,6 +14,8 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 RUN adduser -D -u 10001 app && mkdir -p /data/media && chown app /data/media
 USER app
 COPY --from=build /out/networkai /usr/local/bin/networkai
+# Multi-region experiments only (docker compose --profile multiregion).
+COPY --from=build /out/wanproxy /usr/local/bin/wanproxy
 # Trained offline by tools/ranking/train_eval.py (embeddings + ranker).
 COPY models /models
 ENV MEDIA_DIR=/data/media MODEL_DIR=/models
