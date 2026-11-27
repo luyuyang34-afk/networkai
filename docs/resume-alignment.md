@@ -58,6 +58,27 @@
 
 配置好 key 之后用 k6 或手动跑几百次，就能从 `/metrics` 拿到成功率和平均成本，再把数字补回去。
 
+## Bullet 6 · 扩展到大规模（第三轮新增）— ✅（全部是单机上的受控实验）
+
+这一轮的每个机制都按"复现问题 → 修复 → 测量"做过。下面每条 bullet 里的数字都来自 `docs/*-experiment.md`。**简历版面有限，挑 2–3 条最贴岗位的**：做后端或基础设施就选分片和 CDC，做产品后端就选 feed 和热点。
+
+> **Distributed Data Pipeline:** Replaced a polling worker with **PostgreSQL logical-decoding CDC** into **Kafka** (Redpanda), with independent consumer groups (search indexing, timeline fan-out, cache invalidation, stats), manual commits and per-group DLQs; a Redis outage no longer stalls search (**>60 s → 0.73 s** post-to-searchable).
+
+> **Feed at Scale:** Built a **hybrid fan-out** home timeline (push to Redis for regular authors, pull at read time for high-follower accounts); for a 200K-follower author, other users' posts waited **1.28 s → 14 ms** behind its fan-out.
+
+> **Hot-Key Mitigation:** Cut database load from a viral post across 32 API instances from **1,192 to 4 queries/s** and stale reads from **29.5% to 0%** with singleflight, **lease-based cache fills** (Facebook memcache) and probabilistic early refresh (XFetch); sharded like counters raised single-post like throughput **3.7×**.
+
+> **Online Resharding:** Sharded posts by author over 64 logical shards with node-side ownership fencing, and moved them **2 → 4 PostgreSQL nodes under live traffic with 0 of 46,608 acknowledged writes lost** (a naive copy-then-flip lost 98); per-shard write pause P50 46 ms.
+
+> **Consistency & Multi-Region:** Added read replicas with **LSN consistency tokens** (read-your-writes violations **31% → 0%**); cut cross-region post latency **429 → 73 ms** by collapsing six round trips into one pipelined statement; ran partition drills showing async failover produced **54K split-brain writes**, eliminated with **lease-based self-fencing**.
+
+⚠️ 面试时必须能说清楚的前提：
+- **全部在一台 4 vCPU 机器上跑。** 多节点、多区域是模拟出来的：多个 PostgreSQL 容器，加上自写的延迟代理。
+  - 证明的是正确性、延迟和机制本身的开销；
+  - **不能说"吞吐量随节点线性扩展"**，因为没测过。
+- **分片子系统还没接到 API 上**（ADR 0009 写了原因和迁移步骤）。被问到时直接说"subsystem measured in isolation; migrating the API onto it is the next step"。
+- 不要写"支持 10 万或 1000 万用户"。可以写的是"在出现这个问题的规模下复现并修复了它"。[system-design.md](system-design.md) 第 2 节有容量估算，说明每个机制在什么规模才需要。
+
 ---
 
 ## 去重：三个项目之间
@@ -74,4 +95,6 @@
 | PostgreSQL, Elasticsearch, Docker | ✅ |
 | Python | ✅（训练和评估脚本，只用了 numpy 和 pandas） |
 | Prometheus, k6 | ✅ 可以考虑加进技能栏 |
+| Redis, Kafka, CDC (logical replication) | ✅ 第三轮新增，可以加进技能栏 |
+| 分布式系统概念：分片、复制、一致性、SLO | ✅ 每个都有 ADR 和实验支撑 |
 | Kotlin, Jetpack Compose, LangChain | ❌ 三个项目都没有用到，建议从技能栏删掉 |

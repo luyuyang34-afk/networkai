@@ -11,7 +11,9 @@
 | 4 | [04-auth-security.md](04-auth-security.md) | bcrypt、JWT、认证 vs 授权、几个真实的安全坑 |
 | 5 | [05-ranking.md](05-ranking.md) | 推荐系统：两阶段召回+排序、离线评估怎么不作弊、合成数据怎么讲 |
 | 6 | [06-performance.md](06-performance.md) | 压测方法、找瓶颈的套路、bulkhead/批量化/缓存这些模式 |
-| 7 | [interview-questions.md](interview-questions.md) | 面试追问清单（每题追三层） |
+| 7 | [07-scale-out.md](07-scale-out.md) | 规模变大以后：扩散、CDC、读副本、热点、分片、跨区域、SLO |
+| 8 | [../system-design.md](../system-design.md) | 整个项目作为"设计一个 news feed"的系统设计题答案（英文） |
+| 9 | [interview-questions.md](interview-questions.md) | 面试追问清单（每题追三层） |
 
 还有一份英文的 [engineering log](../engineering-log.md)，记录了做这个项目时真实踩到的坑。"讲一个你遇到的最难的 bug"可以直接从这里讲。
 

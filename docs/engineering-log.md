@@ -209,3 +209,30 @@ test can express are now covered by one:
 | Unmaintained JWT libraries; no algorithm pinning | Exposure to algorithm-confusion attacks | `TestTokenRejections` (`alg none`) |
 | `context.Background()` everywhere, no server timeouts | One slow dependency could hold connections forever | — |
 | Search returned every matching document, unpaginated | Response size grows without bound | `TestSearchPaginationAndFilters` |
+
+## 2026-11-26/27 · Scale-out phase: where the bugs are recorded
+
+Each scale-out experiment has its own "Bugs and pitfalls found" section,
+next to the numbers. The ones worth retelling:
+
+- **CDC**:
+  - consumers restarted with offset reset "at end" silently skipped 14
+    of 21 records; fixed with "at start" and idempotent handlers;
+  - a 60 s rejoin delay; fixed with an explicit LeaveGroup.
+  ([cdc-experiment.md](cdc-experiment.md))
+- **Replicas**: a timeline rebuilt from a lagging replica stayed wrong for
+  days, because the post's fan-out had already skipped it. Cache fills
+  now read the primary. ([replica-experiment.md](replica-experiment.md))
+- **Hot keys**: the single-row like counter passed every unit test and
+  collapsed only under concurrency on one key. Singleflight showed "0
+  stale reads" in the load test while a deterministic test proved the
+  race. ([hotkey-experiment.md](hotkey-experiment.md))
+- **Resharding**:
+  - new nodes kept an empty table's planner statistics after the bulk
+    copy (seq scan + sort, 150–280 ms per query);
+  - a "highest change seen" copy horizon skipped in-flight transactions,
+    and the load test caught it only 1 time in 3.
+  ([sharding-experiment.md](sharding-experiment.md))
+- **Multi-region**: setting synchronous replication at startup hung
+  initdb's `CREATE DATABASE`.
+  ([multiregion-experiment.md](multiregion-experiment.md))

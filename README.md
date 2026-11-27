@@ -20,15 +20,20 @@ load:
 
 ```mermaid
 flowchart LR
-    W[Next.js web] -->|REST + JWT| API[Go API]
-    API -->|"1 tx: post + outbox row"| PG[(PostgreSQL<br/>source of truth)]
-    API -->|media| OBJ[(disk / GCS)]
-    API -->|browse| PG
-    API -->|search, feed retrieval| ES[(Elasticsearch<br/>text + vectors)]
+    W[Next.js web] -->|REST + JWT<br/>X-Consistency-Token| API[Go API]
+    API -->|"1 round trip: post + outbox row"| PG[(PostgreSQL primary<br/>source of truth)]
+    API -->|reads, unless token is ahead| RP[(streaming replica)]
+    PG -.->|WAL| RP
+    API -->|hot posts: leases + XFetch<br/>home timelines| R[(Redis)]
+    API -->|search, feed retrieval| ES[(Elasticsearch)]
     API -.->|rewrite draft| LLM[LLM API]
-    IDX[Indexer] -->|poll outbox<br/>SKIP LOCKED| PG
-    IDX -->|embed + index<br/>external version| ES
-    P[Prometheus] -.->|scrape| API & IDX
+    PG -->|logical decoding| RL[CDC relay]
+    RL -->|post-events, 12 partitions| K[[Kafka / Redpanda]]
+    K --> C1[search-indexer] --> ES
+    K --> C2[timeline-fanout] --> R
+    K --> C3[post-stats]
+    K --> C4[cache-invalidation] --> R
+    P[Prometheus<br/>SLO burn-rate alerts] -.->|scrape| API & RL & C1
 ```
 
 ## Key numbers
@@ -41,6 +46,28 @@ flowchart LR
 | Full reindex, 100k posts | **134 s → 4.7 s** (`_bulk`, A/B on the same data) | [engineering log](docs/engineering-log.md) |
 | Feed ranking (offline, **synthetic data**) | nDCG@10 **+14.0%** vs chronological on 300k held-out impressions | [ranking eval](docs/ranking-eval.md), [why synthetic](docs/ranking.md#the-data-is-synthetic-and-this-is-what-that-means) |
 | Tests | Go: unit + integration + e2e with the race detector (74% coverage); Playwright: 8 UI flows; CI runs all of it | [CI](.github/workflows/ci.yml) |
+
+## Scaling out: each problem reproduced, fixed and measured
+
+Each row started as a failure reproduced on purpose, at the scale where it
+appears. Each fix is switchable, so the before/after comes from the same
+code and data.
+
+| Problem at scale | Fix | Before → after | Evidence |
+|---|---|---|---|
+| A celebrity post written to every follower's timeline | Hybrid fan-out: push for most authors, pull for authors above 10k followers | 200k followers: a regular post waits **1.28 s → 14 ms** behind it | [timeline-experiment](docs/timeline-experiment.md), [ADR 0005](docs/adr/0005-hybrid-fanout-home-timeline.md) |
+| One slow job (fan-out, Redis outage) stalls search indexing | CDC from the WAL, Kafka, one consumer group per job | Redis down: search **stalled > 60 s → 0.73 s** | [cdc-experiment](docs/cdc-experiment.md), [ADR 0006](docs/adr/0006-cdc-and-consumer-groups.md) |
+| A user's own post missing right after posting (replica lag) | LSN consistency tokens | **31% → 0%** violations; browsing still 100% on the replica | [replica-experiment](docs/replica-experiment.md), [ADR 0007](docs/adr/0007-read-replicas-consistency-tokens.md) |
+| Likes on a viral post queue on one row lock | 16-way sharded counters | **932 → 3,410** likes/s on one post, exact counts | [hotkey-experiment](docs/hotkey-experiment.md) |
+| Cache stampede and stale sets on a hot post (32 instances) | singleflight + leases (Facebook memcache) + XFetch | DB loads **1,192/s → 4/s**, stale reads **29.5% → 0%** | [hotkey-experiment](docs/hotkey-experiment.md), [ADR 0008](docs/adr/0008-hot-keys-sharded-counters-and-cache-leases.md) |
+| One primary is not enough: resharding 2 → 4 nodes under load | Logical shards, node-side ownership, xmin-horizon copy, per-shard fence | Naive move: **98 posts lost**; fenced: **0 lost of 46,608**, write block P50 46 ms | [sharding-experiment](docs/sharding-experiment.md), [ADR 0009](docs/adr/0009-sharding-and-online-resharding.md) |
+| Creating a post from another region (70 ms RTT) | One CTE statement, token pipelined | 6 round trips → 1: **429 → 73 ms** | [multiregion-experiment](docs/multiregion-experiment.md) |
+| Region partition followed by failover | Leader lease + self-fencing; sync replication where RPO must be 0 | Async: **54,803 split-brain writes**; fenced: **0**; sync: 0 lost, but +72 ms per commit | [multiregion-experiment](docs/multiregion-experiment.md), [ADR 0010](docs/adr/0010-multi-region-home-region-writes-and-failover.md) |
+| Alerts that page on blips and miss slow leaks | SLOs with multiwindow burn-rate alerts | 6 scenarios unit-tested with promtool in CI | [slo.md](docs/slo.md) |
+
+What these experiments do **not** show is throughput scaling. All of
+them ran on one 4-vCPU machine, so extra nodes share the same CPUs. They
+measure correctness, latency and the cost of each mechanism.
 
 ## Quick start
 
@@ -83,6 +110,12 @@ Errors always look like `{"error":{"code","message"},"request_id"}`.
 | [0002](docs/adr/0002-idempotent-order-independent-indexing.md) | Events carry ids; indexer re-reads the row; external versions + tombstones make replays and reordering harmless |
 | [0003](docs/adr/0003-pause-worker-on-dependency-outage.md) | A dependency outage pauses the worker instead of burning per-event retries (bug found in the outage demo) |
 | [0004](docs/adr/0004-llm-writing-assistant.md) | The LLM is an unreliable, metered dependency: timeout, one retry, per-user limit, token/cost accounting, injection mitigation, graceful fallback |
+| [0005](docs/adr/0005-hybrid-fanout-home-timeline.md) | Hybrid fan-out home timeline in Redis (push regular authors, pull celebrities) |
+| [0006](docs/adr/0006-cdc-and-consumer-groups.md) | CDC from the WAL to Kafka; one consumer group per downstream job |
+| [0007](docs/adr/0007-read-replicas-consistency-tokens.md) | Read replicas with LSN consistency tokens for read-your-writes |
+| [0008](docs/adr/0008-hot-keys-sharded-counters-and-cache-leases.md) | Sharded like counters; post cache with singleflight, leases, XFetch, CDC invalidation |
+| [0009](docs/adr/0009-sharding-and-online-resharding.md) | Posts sharded by author over 64 logical shards; fenced online moves |
+| [0010](docs/adr/0010-multi-region-home-region-writes-and-failover.md) | One-round-trip writes across regions; fenced failover; replication mode per data type |
 | [ranking.md](docs/ranking.md) | Two-stage feed: kNN retrieval → logistic-regression ranker → author diversity; bulkhead so the feed cannot starve search |
 
 ## Documentation
@@ -90,6 +123,8 @@ Errors always look like `{"error":{"code","message"},"request_id"}`.
 - [benchmark.md](docs/benchmark.md): load-test method, results, before/after, caveats
 - [engineering-log.md](docs/engineering-log.md): every real bug and bottleneck, how it was found, fixed and verified
 - [bottlenecks.md](docs/bottlenecks.md): open environment blockers and remaining limits (Chinese)
+- [system-design.md](docs/system-design.md): the project as a "design a news feed" interview answer, with numbers
+- [slo.md](docs/slo.md): objectives, burn-rate alerts and error budget policy
 - [runbook.md](docs/runbook.md): what to do when each alert fires
 - [ranking.md](docs/ranking.md) / [ranking-eval.md](docs/ranking-eval.md): feed design and generated offline evaluation
 - [docs/learn/](docs/learn/README.md): study notes and an interview question bank (Chinese)
@@ -126,9 +161,13 @@ versions were:
 - **The LLM assistant's real latency and cost are unmeasured.** No provider
   was reachable from the build environment; the instrumentation is in
   place.
-- **Single region and a single PostgreSQL primary.** The polling outbox
-  adds ~0.5 s of search lag. Orphaned media and tombstones are cleaned by
-  periodic jobs.
+- **The sharded store is not yet behind the API.** It is a measured
+  subsystem (ADR 0009). Moving the API onto it means:
+  - co-locating likes and outbox rows with their posts;
+  - one CDC relay per node;
+  - replacing the user join.
+- **Multi-region is simulated on one machine** with a latency proxy. Real
+  regions add jitter, asymmetric routes and partial partitions.
 - **Benchmarks ran with the load generator on the same 4 vCPUs** as the
   services.
 
@@ -142,10 +181,16 @@ it changed.
 ## Layout
 
 ```
-cmd/networkai/        api | indexer | migrate | reindex [-fresh] | sweep-media
+cmd/networkai/        api | relay | consume <group> | indexer | migrate | reindex [-fresh] | sweep-media
+cmd/wanproxy/         TCP proxy simulating a cross-region link (delay, partition, VIP flip)
 internal/httpapi/     routing, middleware, handlers, error mapping
 internal/store/       PostgreSQL; every post write also writes the outbox
 internal/outbox/      outbox worker: claiming, retries, dead-letter, pause
+internal/cdc/         WAL -> Kafka relay, consumer groups with DLQ
+internal/timeline/    hybrid fan-out home timelines (Redis)
+internal/postcache/   hot-key cache: singleflight, leases, XFetch
+internal/shard/       sharded posts: router, ownership, online mover
+internal/stats/       idempotent post-stats consumer
 internal/indexer/     events -> Elasticsearch, bulk reindex, blue/green rebuild
 internal/search/      Elasticsearch client: mapping, analyzers, search, kNN
 internal/feed/        two-stage personalised feed + bulkhead
@@ -155,6 +200,7 @@ internal/metrics/     Prometheus metrics
 internal/auth, media, maintenance, db, e2e
 web/                  Next.js frontend + Playwright tests
 tools/                synthetic data, ranking trainer/evaluator, k6 load test
+tools/experiments/    fanout, coupling, replica, hotkey, hotpost, reshard, wan, failover
 models/               trained embedding + ranker (small JSON files)
-deploy/prometheus/    scrape config and alert rules
+deploy/prometheus/    scrape config, alert rules, SLO rules + promtool tests
 ```
