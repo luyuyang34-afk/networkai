@@ -74,6 +74,8 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -l .; exit 1)
       - name: vet
         run: go vet ./...
+      - name: alert rules (promtool check + SLO burn-rate unit tests)
+        run: make check-alerts
       - name: test (unit + integration, race detector)
         run: go test -race -count=1 -coverpkg=./internal/... -coverprofile=cover.out ./...
       - name: coverage

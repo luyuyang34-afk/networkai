@@ -24,6 +24,10 @@ lint: ## gofmt + go vet
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
 	go vet ./...
 
+check-alerts: ## Validate Prometheus rules and run the SLO burn-rate alert tests
+	docker run --rm -v $(CURDIR)/deploy/prometheus:/p -w /p --entrypoint promtool prom/prometheus:v3.5.0 check rules alerts.yml slo.yml
+	docker run --rm -v $(CURDIR)/deploy/prometheus:/p -w /p --entrypoint promtool prom/prometheus:v3.5.0 test rules slo_test.yml
+
 test: ## Unit tests (integration tests skip without databases)
 	go test -race ./...
 
