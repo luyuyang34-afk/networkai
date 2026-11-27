@@ -12,7 +12,9 @@ posts and get a personalized "For you" feed.
   that appears at scale was first reproduced on purpose, then fixed, then
   measured before and after on the same code and data.
 
-![NetworkAI architecture](img/architecture.png)
+![NetworkAI architecture](architecture.png)
+
+How it got here, step by step: [evolution.md](evolution.md).
 
 ## Design principles
 
@@ -100,5 +102,5 @@ posts and get a personalized "For you" feed.
   isolation; the API still runs on a single primary with a replica.
 - The ranking model was trained and evaluated on synthetic data.
 
-Details: [system-design.md](system-design.md), the decision records in
-[adr/](adr/), and the `*-experiment.md` files.
+Details: [system-design.md](../docs/system-design.md), the decision records in
+[docs/adr/](../docs/adr/), and the `*-experiment.md` files in [docs/](../docs/).

@@ -36,6 +36,19 @@ flowchart LR
     P[Prometheus<br/>SLO burn-rate alerts] -.->|scrape| API & RL & C1
 ```
 
+## Design graphs
+
+All diagrams live in [design-graph/](design-graph/README.md):
+
+- [Architecture diagram](design-graph/architecture.png): the current system.
+- [High-level overview](design-graph/overview.md): design principles, components, request flows, results.
+- [Design evolution](design-graph/evolution.md): 10 steps from the prototype, one diagram per step, each with the problem, the change, the rationale and the evidence.
+- [Request flows](design-graph/flows.md): sequence diagrams for writes, timeline reads, read-your-writes, the hot-post cache, shard moves and failover.
+- [Data model](design-graph/data-model.md): tables and keys in every store.
+- [Failure modes](design-graph/failure-modes.md): what happens when each component fails.
+
+[![Architecture](design-graph/architecture.png)](design-graph/README.md)
+
 ## Key numbers
 
 | | Result | Evidence |
@@ -123,7 +136,6 @@ Errors always look like `{"error":{"code","message"},"request_id"}`.
 - [benchmark.md](docs/benchmark.md): load-test method, results, before/after, caveats
 - [engineering-log.md](docs/engineering-log.md): every real bug and bottleneck, how it was found, fixed and verified
 - [bottlenecks.md](docs/bottlenecks.md): open environment blockers and remaining limits (Chinese)
-- [overview.md](docs/overview.md): one-page description with the architecture diagram
 - [system-design.md](docs/system-design.md): the project as a "design a news feed" interview answer, with numbers
 - [slo.md](docs/slo.md): objectives, burn-rate alerts and error budget policy
 - [runbook.md](docs/runbook.md): what to do when each alert fires
