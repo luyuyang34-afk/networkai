@@ -140,26 +140,6 @@ func scanPost(row pgx.Row) (Post, error) {
 	return p, err
 }
 
-func (s *Store) CreatePost(ctx context.Context, np NewPost) (Post, error) {
-	var p Post
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO posts (id, author_id, message, media_type, media_key, media_url)
-			 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''))`,
-			np.ID, np.AuthorID, np.Message, np.MediaType, np.MediaKey, np.MediaURL)
-		if err != nil {
-			return err
-		}
-		if err := enqueuePostChanged(ctx, tx, np.ID); err != nil {
-			return err
-		}
-		p, err = scanPost(tx.QueryRow(ctx,
-			`SELECT `+postColumns+` FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id = $1`, np.ID))
-		return err
-	})
-	return p, err
-}
-
 // UpdatePostMessage edits a post owned by authorID. It returns ErrNotFound if
 // the post does not exist (or is deleted) and ErrForbidden if someone else
 // owns it.

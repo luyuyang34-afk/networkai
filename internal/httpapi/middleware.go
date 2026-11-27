@@ -130,7 +130,11 @@ func consistencyToken(s *Server, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(&tokenWriter{ResponseWriter: w, s: s, r: r}, r)
+		// Writes that can fetch the token in their own round trip fill the
+		// sink; the others cost one extra query.
+		ctx, sink := store.WithTokenSink(r.Context())
+		r = r.WithContext(ctx)
+		next.ServeHTTP(&tokenWriter{ResponseWriter: w, s: s, r: r, sink: sink}, r)
 	})
 }
 
@@ -140,6 +144,7 @@ type tokenWriter struct {
 	http.ResponseWriter
 	s    *Server
 	r    *http.Request
+	sink *store.TokenSink
 	done bool
 }
 
@@ -147,7 +152,9 @@ func (t *tokenWriter) WriteHeader(code int) {
 	if !t.done {
 		t.done = true
 		if code >= 200 && code < 300 {
-			if tok, err := t.s.consistency.WriteToken(t.r.Context()); err == nil {
+			if t.sink.Token != "" {
+				t.Header().Set("X-Consistency-Token", t.sink.Token)
+			} else if tok, err := t.s.consistency.WriteToken(t.r.Context()); err == nil {
 				t.Header().Set("X-Consistency-Token", tok)
 			}
 		}
